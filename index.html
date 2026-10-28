@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a141b" />
+    <title>RailSim · 铁路规划</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="game" aria-hidden="true"></div>
+
+      <div class="vignette" aria-hidden="true"></div>
+
+      <header class="topbar" id="topbar">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg viewBox="0 0 40 40" aria-hidden="true">
+              <path d="M20 4 35 12.5v15L20 36 5 27.5v-15z" fill="none" stroke="currentColor" stroke-width="1.8" />
+              <path d="M16 12v16M24 12v16" fill="none" stroke="currentColor" stroke-width="1.6" />
+              <path d="M14 16h12M14 21h12M14 26h12" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".65" />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1>RailSim</h1>
+            <p>铁路规划</p>
+          </div>
+        </div>
+
+        <div class="seed-bar">
+          <label class="seed-field" for="seed-input">
+            <span>种子</span>
+            <input id="seed-input" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" aria-label="地图种子" />
+          </label>
+          <button class="btn btn-ghost" id="regenerate" title="重新生成地图（G）">重新生成</button>
+          <button class="btn btn-icon" id="random-seed" title="随机种子" aria-label="随机种子">⟳</button>
+        </div>
+
+        <div class="topbar-right">
+          <div class="chip">
+            <span>资金</span>
+            <strong class="money" id="stat-money">¥ 200,000</strong>
+          </div>
+          <div class="chip">
+            <span>日期</span>
+            <strong>第 <span id="stat-day">1</span> 日 <em id="stat-clock">08:00</em></strong>
+          </div>
+          <button class="btn btn-ghost garage-button" id="garage-button" title="车库">车库</button>
+          <div class="speed-group" role="group" aria-label="时间控制">
+            <button class="speed-btn" data-speed="0" title="暂停">❚❚</button>
+            <button class="speed-btn is-active" data-speed="1" title="1× 速度">▶</button>
+            <button class="speed-btn" data-speed="2" title="2× 速度">▶▶</button>
+          </div>
+        </div>
+      </header>
+
+      <aside class="panel panel-left" id="panel-left">
+        <div class="panel-head">
+          <div>
+            <h2>线路</h2>
+            <p class="panel-sub">线路表</p>
+          </div>
+          <div class="panel-head-actions">
+            <span class="badge" id="line-count">0</span>
+            <button class="btn btn-icon" id="line-new" title="新建线路" aria-label="新建线路">＋</button>
+          </div>
+        </div>
+
+        <div class="empty-state" id="line-empty">
+          <div class="empty-icon" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <p>还没有线路</p>
+          <span>先铺轨建站，再创建线路并配车。</span>
+          <button class="btn btn-primary" id="new-line">＋ 新建线路</button>
+        </div>
+
+        <div class="line-list hidden" id="line-list"></div>
+
+        <div class="line-editor hidden" id="line-editor">
+          <div class="editor-head">
+            <strong id="line-editor-title">新建线路</strong>
+            <span id="line-editor-count">0 站</span>
+          </div>
+
+          <label class="editor-field">
+            <span>名称</span>
+            <input id="line-name" type="text" maxlength="24" spellcheck="false" />
+          </label>
+
+          <div class="editor-row">
+            <span>标识色</span>
+            <div class="line-colors" id="line-colors"></div>
+          </div>
+
+          <div class="editor-row">
+            <span>类型</span>
+            <div class="loop-group" role="group" aria-label="线路类型">
+              <button data-loop="0" class="is-active">往返</button>
+              <button data-loop="1">环线</button>
+            </div>
+          </div>
+
+          <div class="editor-stops-head">
+            <span>停靠站</span>
+            <button class="editor-link" id="line-clear-stops">清空</button>
+          </div>
+          <div class="editor-stops" id="line-stops"></div>
+          <p class="editor-hint">点击车站添加停靠，拖动可排序，至少 2 站。</p>
+
+          <div class="editor-actions">
+            <button class="btn btn-ghost" id="line-cancel">取消</button>
+            <button class="btn btn-primary" id="line-save">保存线路</button>
+          </div>
+        </div>
+
+        <div class="panel-section network-section">
+          <h3>网络概览</h3>
+          <div class="mini-grid">
+            <div><span>车站</span><strong id="stat-stations">0</strong></div>
+            <div><span>轨道</span><strong id="stat-tracks">0</strong></div>
+            <div><span>列车</span><strong id="stat-trains">0</strong></div>
+            <div><span>线路</span><strong id="stat-lines">0</strong></div>
+          </div>
+          <p class="network-note" id="network-note">连通 0 / 0 · 库存 0 · 已投入 ¥ 0</p>
+        </div>
+
+        <div class="panel-section world-section">
+          <h3>地图信息</h3>
+          <div class="mini-grid">
+            <div><span>总格数</span><strong id="world-total">—</strong></div>
+            <div><span>陆地</span><strong id="world-land">—</strong></div>
+            <div><span>城镇</span><strong id="world-towns">—</strong></div>
+            <div><span>工业</span><strong id="world-industry">—</strong></div>
+          </div>
+        </div>
+
+        <div class="panel-section panel-section-grow legend-section">
+          <h3>地形图例</h3>
+          <ul class="legend" id="legend"></ul>
+          <p class="legend-note">成本 = 基础单价 × 地形系数。</p>
+        </div>
+      </aside>
+
+      <aside class="panel panel-right" id="panel-right">
+        <div class="panel-head">
+          <div>
+            <h2>地块</h2>
+            <p class="panel-sub">地块信息</p>
+          </div>
+          <div class="panel-head-actions">
+            <span class="badge" id="tile-coord">—</span>
+            <button class="btn btn-icon inspector-close" id="inspector-close" title="关闭" aria-label="关闭地块面板">×</button>
+          </div>
+        </div>
+
+        <div class="empty-state empty-state-sm" id="inspector-empty">
+          点击地块查看地形与建造信息。
+        </div>
+
+        <div class="inspector hidden" id="inspector-body">
+          <div class="tile-title">
+            <span class="tile-dot" id="tile-dot"></span>
+            <div class="tile-title-text">
+              <strong id="tile-name">—</strong>
+              <span id="tile-blob">—</span>
+            </div>
+            <span class="tile-cost" id="tile-cost">×1.0</span>
+          </div>
+
+          <p class="tile-desc" id="tile-desc">—</p>
+
+          <div class="facility hidden" id="facility-card">
+            <div class="facility-head">
+              <span class="facility-dot" id="facility-dot"></span>
+              <div class="facility-text">
+                <strong id="facility-name">—</strong>
+                <span id="facility-type">—</span>
+              </div>
+            </div>
+            <div class="facility-stats">
+              <div><span>覆盖</span><strong id="facility-coverage">—</strong></div>
+              <div><span>连通</span><strong id="facility-connect">—</strong></div>
+            </div>
+          </div>
+
+          <div class="meters">
+            <div class="meter">
+              <span>海拔</span>
+              <div class="bar"><i id="bar-elev"></i></div>
+              <em id="val-elev">0.00</em>
+            </div>
+            <div class="meter">
+              <span>湿度</span>
+              <div class="bar"><i id="bar-moist"></i></div>
+              <em id="val-moist">0%</em>
+            </div>
+            <div class="meter">
+              <span>经济带</span>
+              <div class="bar"><i id="bar-econ"></i></div>
+              <em id="val-econ">0%</em>
+            </div>
+          </div>
+
+          <dl class="kv">
+            <div><dt>需求</dt><dd id="tile-demand">—</dd></div>
+            <div><dt>轨道</dt><dd id="tile-track">未铺设</dd></div>
+            <div><dt>车站</dt><dd id="tile-station">无</dd></div>
+            <div><dt>覆盖</dt><dd id="tile-coverage">未覆盖</dd></div>
+            <div><dt>每格距离</dt><dd>≈ 5 km</dd></div>
+          </dl>
+
+          <div class="inspector-actions">
+            <button class="btn btn-ghost" id="action-track">铺设轨道</button>
+            <button class="btn btn-ghost" id="action-station">建造车站</button>
+            <button class="btn btn-ghost btn-danger action-wide hidden" id="action-remove">拆除</button>
+          </div>
+          <p class="hint">建造立即扣款，拆除返还 50%；无轨道时建站会自动补轨。</p>
+        </div>
+      </aside>
+
+      <div class="dock" id="dock">
+        <div class="tool-group" role="toolbar" aria-label="建造工具">
+          <button class="tool is-active" data-tool="inspect" title="查看地块（1）">
+            <kbd>1</kbd><span>查看</span>
+          </button>
+          <button class="tool" data-tool="track" title="铺设轨道（2）">
+            <kbd>2</kbd><span>铺轨</span>
+          </button>
+          <button class="tool" data-tool="station" title="建造车站（3）">
+            <kbd>3</kbd><span>车站</span>
+          </button>
+          <button class="tool" data-tool="demolish" title="拆除（4）">
+            <kbd>4</kbd><span>拆除</span>
+          </button>
+          <button class="tool" data-tool="segment" title="编辑线路段（5）">
+            <kbd>5</kbd><span>路段</span>
+          </button>
+        </div>
+
+        <div class="dock-divider"></div>
+
+        <div class="dock-info">
+          <span class="live-dot"></span>
+          <span id="dock-status">拖动平移 · 滚轮缩放 · 点击地块</span>
+        </div>
+
+        <div class="dock-right">
+          <span class="scale-readout" id="zoom-readout">每格 ≈ 5 km</span>
+          <div class="zoom-group" role="group" aria-label="地图缩放">
+            <button class="btn btn-icon" id="zoom-out" title="缩小" aria-label="缩小">−</button>
+            <button class="btn btn-icon" id="zoom-in" title="放大" aria-label="放大">＋</button>
+            <button class="btn btn-icon" id="zoom-fit" title="适配全图（F）" aria-label="适配全图">⤢</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="station-picker hidden" id="station-picker" role="group" aria-label="车站类型">
+        <div class="picker-head">
+          <span>车站类型</span>
+          <em>选择后点击地块</em>
+        </div>
+        <div class="picker-options" id="station-options"></div>
+      </div>
+
+      <div class="modal hidden" id="garage-modal" role="dialog" aria-modal="true" aria-labelledby="garage-title">
+        <div class="modal-backdrop" id="garage-backdrop"></div>
+        <div class="modal-card garage-card">
+          <div class="modal-head">
+            <div>
+              <h2 id="garage-title">车库</h2>
+              <p class="panel-sub">列车与货运</p>
+            </div>
+            <div class="modal-head-actions">
+              <span class="garage-money" id="garage-money">¥ 200,000</span>
+              <button class="btn btn-icon" id="garage-close" aria-label="关闭车库">×</button>
+            </div>
+          </div>
+          <div class="garage-body" id="garage-body"></div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <div class="modal-backdrop" id="confirm-backdrop"></div>
+        <div class="modal-card confirm-card">
+          <div class="modal-head">
+            <div>
+              <h2 id="confirm-title">重新生成地图？</h2>
+              <p class="panel-sub" id="confirm-sub">清空存档</p>
+            </div>
+            <button class="btn btn-icon" id="confirm-close" aria-label="取消">×</button>
+          </div>
+          <div class="confirm-body">
+            <p class="confirm-text" id="confirm-text"></p>
+            <p class="confirm-warn">将删除存档并重置全部进度，无法撤销。</p>
+          </div>
+          <div class="confirm-actions">
+            <button class="btn" id="confirm-cancel">取消</button>
+            <button class="btn btn-danger" id="confirm-ok">清空存档并生成</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="map-tooltip hidden" id="map-tooltip" role="tooltip" aria-live="polite"></div>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+      <div class="boot" id="boot">
+        <div class="boot-ring"></div>
+        <p>正在生成地形…</p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

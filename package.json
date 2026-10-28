@@ -1,0 +1,21 @@
+{
+  "name": "railsim",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "inspect:map": "esbuild scripts/inspect-map.ts --bundle --format=esm --platform=node --outfile=.tmp/inspect-map.mjs && node .tmp/inspect-map.mjs"
+  },
+  "dependencies": {
+    "phaser": "^4.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12"
+  }
+}
