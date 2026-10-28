@@ -1600,6 +1600,77 @@ body.station-mode .toast {
   padding: 14px 18px 18px;
 }
 
+/* ------------------------------------------------------------------ */
+/* 教程                                                                */
+/* ------------------------------------------------------------------ */
+
+#tutorial-modal {
+  z-index: 74;
+}
+
+.tutorial-button {
+  flex: none;
+}
+
+.tutorial-card {
+  width: min(560px, 92vw);
+  max-height: 88vh;
+}
+
+.tutorial-card:focus {
+  outline: none;
+}
+
+.tutorial-body {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px 20px 8px;
+  overflow-y: auto;
+}
+
+.tutorial-section h3 {
+  margin: 0 0 3px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gold);
+  letter-spacing: 0.06em;
+}
+
+.tutorial-section p {
+  margin: 0;
+  color: #c3d0d8;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.tutorial-link-row {
+  margin: 2px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.tutorial-link {
+  color: var(--gold);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(233, 185, 104, 0.4);
+  word-break: break-all;
+}
+
+.tutorial-link:hover {
+  color: #ffe9c2;
+  border-color: currentColor;
+}
+
+.tutorial-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 20px 18px;
+}
+
 .garage-body {
   padding: 15px 18px 20px;
   overflow-y: auto;

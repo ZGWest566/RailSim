@@ -45,6 +45,7 @@
             <span>日期</span>
             <strong>第 <span id="stat-day">1</span> 日 <em id="stat-clock">08:00</em></strong>
           </div>
+          <button class="btn btn-ghost tutorial-button" id="tutorial-button" title="查看教程">教程</button>
           <button class="btn btn-ghost garage-button" id="garage-button" title="车库">车库</button>
           <div class="speed-group" role="group" aria-label="时间控制">
             <button class="speed-btn" data-speed="0" title="暂停">❚❚</button>
@@ -297,6 +298,65 @@
           <div class="confirm-actions">
             <button class="btn" id="confirm-cancel">取消</button>
             <button class="btn btn-danger" id="confirm-ok">清空存档并生成</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal hidden" id="tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
+        <div class="modal-backdrop" id="tutorial-backdrop"></div>
+        <div class="modal-card tutorial-card" id="tutorial-card" tabindex="-1">
+          <div class="modal-head">
+            <div>
+              <h2 id="tutorial-title">怎么玩</h2>
+              <p class="panel-sub">快速上手</p>
+            </div>
+            <button class="btn btn-icon" id="tutorial-close" aria-label="关闭教程">×</button>
+          </div>
+
+          <div class="tutorial-body">
+            <section class="tutorial-section">
+              <h3>铺轨与建站</h3>
+              <p>在地块上铺设轨道，相邻轨道会自动连接。车站建在轨道上，脚下没有轨道时会自动补轨。车站会覆盖周围地块，覆盖越好，客流越多。</p>
+            </section>
+
+            <section class="tutorial-section">
+              <h3>创建线路</h3>
+              <p>新建线路，选择颜色和往返 / 环线，再按顺序点击车站加入停靠。拖动停靠行可以调整顺序。轨道断开或车站缺失时，线路会停运。</p>
+            </section>
+
+            <section class="tutorial-section">
+              <h3>买车与配车</h3>
+              <p>在车库购买客运列车，再把它配到线路上。列车会沿线路自动往返，到站上下客；车厢满了，乘客会留在站内等待。</p>
+            </section>
+
+            <section class="tutorial-section">
+              <h3>客流与票款</h3>
+              <p>乘客从车站出发，按自己的预算和路线前往目的站，必要时换乘。到达目的站后结算票款。列车运行会产生成本，注意收支平衡。</p>
+            </section>
+
+            <section class="tutorial-section">
+              <h3>货运</h3>
+              <p>在工业区旁建造货运站，工业区会陆续产生货单。货运列车不需要线路，会自动沿轨道接单、装货并送到目的地。</p>
+            </section>
+
+            <section class="tutorial-section">
+              <h3>经营与存档</h3>
+              <p>顶部可以暂停、继续或调整速度，空格键也能暂停 / 继续。悬停车站、列车和货运列车可以查看详情。进度会自动保存；重新生成地图会清空存档。</p>
+            </section>
+
+            <p class="tutorial-link-row">
+              更多内容与源码：
+              <a
+                class="tutorial-link"
+                href="https://github.com/ZGWest566/RailSim"
+                target="_blank"
+                rel="noopener noreferrer"
+              >GitHub · ZGWest566/RailSim</a>
+            </p>
+          </div>
+
+          <div class="tutorial-actions">
+            <button class="btn btn-primary" id="tutorial-start">知道了</button>
           </div>
         </div>
       </div>

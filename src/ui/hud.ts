@@ -171,6 +171,13 @@ export function createHud(handlers: HudHandlers): Hud {
   const confirmCancel = el<HTMLButtonElement>('confirm-cancel');
   const confirmOk = el<HTMLButtonElement>('confirm-ok');
 
+  const tutorialButton = el<HTMLButtonElement>('tutorial-button');
+  const tutorialModal = el<HTMLDivElement>('tutorial-modal');
+  const tutorialBackdrop = el<HTMLDivElement>('tutorial-backdrop');
+  const tutorialClose = el<HTMLButtonElement>('tutorial-close');
+  const tutorialStart = el<HTMLButtonElement>('tutorial-start');
+  const tutorialCard = el<HTMLDivElement>('tutorial-card');
+
   /* ------------------------------ 状态 ------------------------------ */
 
   let toastTimer = 0;
@@ -194,6 +201,7 @@ export function createHud(handlers: HudHandlers): Hud {
   let garagePreferredLineId: number | null = null;
   let confirmOpen = false;
   let confirmResolve: ((ok: boolean) => void) | null = null;
+  let tutorialOpen = false;
   const lineColorButtons: { button: HTMLButtonElement; color: number; css: string }[] = [];
 
   // 站型选择条由数据生成，避免和 stations.ts 的造价 / 半径出现漂移
@@ -305,6 +313,27 @@ export function createHud(handlers: HudHandlers): Hud {
     });
   }
 
+  /* ------------------------------ 教程 ------------------------------ */
+
+  function openTutorial(): void {
+    if (garageOpen) closeGarage();
+    tutorialOpen = true;
+    tutorialModal.classList.remove('hidden');
+    tutorialCard.focus();
+  }
+
+  function closeTutorial(): void {
+    if (!tutorialOpen) return;
+    tutorialOpen = false;
+    tutorialModal.classList.add('hidden');
+    tutorialButton.focus();
+  }
+
+  tutorialButton.addEventListener('click', openTutorial);
+  tutorialBackdrop.addEventListener('click', closeTutorial);
+  tutorialClose.addEventListener('click', closeTutorial);
+  tutorialStart.addEventListener('click', closeTutorial);
+
   /* ------------------------------ 顶栏 / 种子 ------------------------------ */
 
   el<HTMLButtonElement>('regenerate').addEventListener('click', () =>
@@ -404,12 +433,13 @@ export function createHud(handlers: HudHandlers): Hud {
 
     if (key === 'escape') {
       if (confirmOpen) closeConfirm(false);
+      else if (tutorialOpen) closeTutorial();
       else if (garageOpen) closeGarage();
       else if (lineDraft) handlers.cancelLineEditor();
       return;
     }
 
-    if (confirmOpen) return;
+    if (confirmOpen || tutorialOpen) return;
 
     if (event.code === 'Space' || key === ' ') {
       applySpeed(currentSpeed === 0 ? resumeSpeed : 0);
