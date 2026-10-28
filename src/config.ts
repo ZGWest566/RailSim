@@ -3,6 +3,37 @@
 /** 地图半径（格）。半径 20 共 1261 个六边形。 */
 export const MAP_RADIUS = 20;
 
+export type MapSize = 'small' | 'medium' | 'large';
+
+export interface MapSizePreset {
+  radius: number;
+  label: string;
+  hint: string;
+}
+
+/** 开始界面提供的地图大小；当前默认地图为“小”。 */
+export const MAP_SIZE_PRESETS: Record<MapSize, MapSizePreset> = {
+  small: { radius: MAP_RADIUS, label: '小', hint: '标准地图' },
+  medium: { radius: 28, label: '中', hint: '更大的地图' },
+  large: { radius: 36, label: '大', hint: '超大地图' },
+};
+
+export function mapSizeForRadius(radius: number): MapSize {
+  let best: MapSize = 'small';
+  let bestDelta = Infinity;
+  for (const [size, preset] of Object.entries(MAP_SIZE_PRESETS) as [
+    MapSize,
+    MapSizePreset,
+  ][]) {
+    const delta = Math.abs(preset.radius - radius);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = size;
+    }
+  }
+  return best;
+}
+
 /** 单格外接圆半径（世界像素）。地图直径约 1100px。 */
 export const HEX_SIZE = 30;
 

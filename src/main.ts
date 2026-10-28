@@ -1,10 +1,12 @@
 import Phaser from 'phaser';
 import './style.css';
+import { MAP_RADIUS, MAP_SIZE_PRESETS, mapSizeForRadius, type MapSize } from './config';
 import { bus, type BuildTool } from './core/emitter';
 import { hashSeed } from './core/rng';
 import { hexKey } from './core/hex';
 import type { Tile, World } from './game/world';
 import { describeWorld, generateWorld } from './game/mapgen';
+import { DEFAULT_NAME_CULTURE, isNameCulture, type NameCulture } from './game/names';
 import { RailNetwork, type BuildResult } from './game/network';
 import { RailOperations, type LineSavePayload } from './game/operations';
 import {
@@ -15,7 +17,7 @@ import {
   type SaveGame,
 } from './game/save';
 import { MapScene } from './scenes/MapScene';
-import { createHud, type Hud } from './ui/hud';
+import { createHud, type Hud, type StartSettings } from './ui/hud';
 import type { StationType } from './game/stations';
 
 const initialQuery = new URLSearchParams(window.location.search);
@@ -36,12 +38,26 @@ class RailSimApp {
   private simSpeed = 1;
   private restored = false;
   private saveTimer: number | null = null;
+  private mapSize: MapSize = 'small';
+  private mapCulture: NameCulture = DEFAULT_NAME_CULTURE;
+  private elevationOffset = 0;
+  private moistureOffset = 0;
+  private startScreenOpen = false;
 
   constructor(fallbackSeed: number) {
     const saved = loadSave();
     const seed = saved && Number.isFinite(saved.seed) ? saved.seed : fallbackSeed;
+    const savedMap = saved?.map;
+    this.mapSize = mapSizeForRadius(
+      typeof savedMap?.radius === 'number' ? savedMap.radius : MAP_RADIUS,
+    );
+    this.mapCulture = isNameCulture(savedMap?.culture)
+      ? savedMap.culture
+      : DEFAULT_NAME_CULTURE;
+    this.elevationOffset = clampMapOffset(savedMap?.elevationOffset);
+    this.moistureOffset = clampMapOffset(savedMap?.moistureOffset);
 
-    this.world = generateWorld({ seed });
+    this.world = generateWorld(this.worldOptions(seed));
     this.network = new RailNetwork(this.world);
     this.operations = new RailOperations(this.world, this.network);
 
@@ -59,12 +75,6 @@ class RailSimApp {
     }
 
     this.hud = createHud({
-      regenerate: (text) => this.regenerate(text),
-      randomSeed: () => {
-        const next = randomSeed();
-        this.hud.setSeed(next);
-        this.regenerate(String(next));
-      },
       zoom: (factor) => this.scene()?.zoomBy(factor),
       fit: () => this.scene()?.fitToMap(),
       tool: (tool) => {
@@ -95,9 +105,10 @@ class RailSimApp {
       railView: () => this.operations.view(),
       assignTrain: (trainId, lineId) => this.assignTrain(trainId, lineId),
       unassignTrain: (trainId) => this.unassignTrain(trainId),
+      startNewGame: (settings) => this.startNewGame(settings),
+      continueGame: () => this.continueFromStart(),
     });
 
-    this.hud.setSeed(seed);
     this.hud.setNetworkStats(this.network.stats);
     this.hud.setRailView(this.operations.view());
     this.hud.setClock(this.operations.clockView(), this.network.credits);
@@ -114,7 +125,7 @@ class RailSimApp {
         this.scene()?.setTool(this.activeTool, this.activeStationType);
         if (tileFromUrl) this.scene()?.selectTileByAxial(tileFromUrl.q, tileFromUrl.r);
       }
-      this.scene()?.setSimSpeed(this.simSpeed);
+      this.scene()?.setSimSpeed(this.startScreenOpen ? 0 : this.simSpeed);
     });
     bus.on('tile:select', (tile) => {
       this.hud.showTile(tile);
@@ -181,6 +192,17 @@ class RailSimApp {
       (window as unknown as Record<string, unknown>).__railsim = this;
     }
 
+    this.startScreenOpen = true;
+    this.hud.openStartScreen({
+      seedText: String(seed),
+      size: this.mapSize,
+      culture: this.mapCulture,
+      elevationOffset: this.elevationOffset,
+      moistureOffset: this.moistureOffset,
+      hasSave: this.restored,
+    });
+    this.scene()?.setSimSpeed(0);
+
     this.startAutoSave();
     console.info('[RailSim]', describeWorld(this.world));
   }
@@ -197,11 +219,18 @@ class RailSimApp {
   }
 
   private saveGame(): void {
+    if (this.startScreenOpen) return;
     try {
       const save: SaveGame = {
         version: SAVE_VERSION,
         savedAt: Date.now(),
         seed: this.world.seed,
+        map: {
+          radius: MAP_SIZE_PRESETS[this.mapSize].radius,
+          elevationOffset: this.elevationOffset,
+          moistureOffset: this.moistureOffset,
+          culture: this.mapCulture,
+        },
         network: this.network.serialize(),
         operations: this.operations.serialize(),
       };
@@ -209,6 +238,16 @@ class RailSimApp {
     } catch (error) {
       console.warn('[RailSim] 保存失败', error);
     }
+  }
+
+  private worldOptions(seed: number) {
+    return {
+      seed,
+      radius: MAP_SIZE_PRESETS[this.mapSize].radius,
+      elevationOffset: this.elevationOffset,
+      moistureOffset: this.moistureOffset,
+      culture: this.mapCulture,
+    };
   }
 
   private scene(): MapScene | null {
@@ -387,6 +426,26 @@ class RailSimApp {
 
   /* ------------------------------ 世界重置 ------------------------------ */
 
+  private startNewGame(settings: StartSettings): void {
+    const seed = parseSeed(settings.seedText) ?? randomSeed();
+    this.mapSize = settings.size;
+    this.mapCulture = settings.culture;
+    this.elevationOffset = clampMapOffset(settings.elevationOffset);
+    this.moistureOffset = clampMapOffset(settings.moistureOffset);
+    this.startScreenOpen = false;
+    this.simSpeed = 1;
+    this.regenerate(String(seed));
+    this.scene()?.setSimSpeed(1);
+    this.hud.openTutorial();
+  }
+
+  private continueFromStart(): void {
+    this.startScreenOpen = false;
+    this.simSpeed = 1;
+    this.scene()?.setSimSpeed(1);
+    if (this.restored) this.hud.toast('已继续上次存档');
+  }
+
   private regenerate(seedText: string): void {
     const seed = parseSeed(seedText);
     if (seed === null) {
@@ -400,7 +459,7 @@ class RailSimApp {
       this.hud.closeLineEditor();
     }
 
-    this.world = generateWorld({ seed });
+    this.world = generateWorld(this.worldOptions(seed));
     this.network = new RailNetwork(this.world);
     this.operations = new RailOperations(this.world, this.network);
     this.game.registry.set('world', this.world);
@@ -415,7 +474,7 @@ class RailSimApp {
       scene.setHoveredLine(null);
     }
 
-    this.hud.setSeed(seed);
+    this.hud.bindWorld(this.world);
     this.hud.setNetworkStats(this.network.stats);
     this.hud.setRailView(this.operations.view());
     this.hud.setClock(this.operations.clockView(), this.network.credits);
@@ -442,6 +501,11 @@ class RailSimApp {
     else url.searchParams.delete('tile');
     window.history.replaceState(null, '', url);
   }
+}
+
+function clampMapOffset(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(-0.2, Math.min(0.2, value as number));
 }
 
 function parseSeed(text: string | null | undefined): number | null {

@@ -19,12 +19,28 @@ import {
 } from '../game/stations';
 import { TRAIN_MODEL_LIST } from '../game/trains';
 import { TERRAIN_DEFS, TERRAIN_LIST } from '../game/terrain';
+import { generateWorld } from '../game/mapgen';
+import { NAME_CULTURES, type NameCulture } from '../game/names';
+import { HEX_SIZE, MAP_SIZE_PRESETS, type MapSize } from '../config';
+import { hashSeed } from '../core/rng';
+import { hexCorners } from '../core/hex';
 import type { Tile, World } from '../game/world';
 import type { BuildTool } from '../core/emitter';
 
+export interface StartSettings {
+  seedText: string;
+  size: MapSize;
+  culture: NameCulture;
+  elevationOffset: number;
+  moistureOffset: number;
+}
+
+export interface StartScreenDefaults extends StartSettings {
+  hasSave: boolean;
+}
+
+
 export interface HudHandlers {
-  regenerate(seedText: string): void;
-  randomSeed(): void;
   zoom(factor: number): void;
   fit(): void;
   tool(tool: BuildTool): void;
@@ -45,6 +61,8 @@ export interface HudHandlers {
   railView(): RailView;
   assignTrain(trainId: number, lineId: number): void;
   unassignTrain(trainId: number): void;
+  startNewGame(settings: StartSettings): void;
+  continueGame(): void;
 }
 
 export interface Hud {
@@ -57,12 +75,13 @@ export interface Hud {
   refreshSelected(): void;
   hoverTile(tile: Tile | null): void;
   setZoom(zoom: number): void;
-  setSeed(seed: number): void;
   setTool(tool: BuildTool): void;
   setStationType(type: StationType): void;
   openLineEditor(line: LineView | null, defaultName: string): void;
   closeLineEditor(): void;
   addDraftStop(stop: LineStop): void;
+  openStartScreen(defaults: StartScreenDefaults): void;
+  openTutorial(): void;
   toast(message: string): void;
 }
 
@@ -85,7 +104,6 @@ interface DraftLine {
 export function createHud(handlers: HudHandlers): Hud {
   /* ------------------------------ 元素 ------------------------------ */
 
-  const seedInput = el<HTMLInputElement>('seed-input');
   const legend = el<HTMLUListElement>('legend');
   const dockStatus = el<HTMLSpanElement>('dock-status');
   const dockInfo = document.querySelector<HTMLDivElement>('.dock-info');
@@ -102,12 +120,6 @@ export function createHud(handlers: HudHandlers): Hud {
   const tileTrack = el<HTMLElement>('tile-track');
   const tileStation = el<HTMLElement>('tile-station');
   const tileCoverage = el<HTMLElement>('tile-coverage');
-  const barElev = el<HTMLElement>('bar-elev');
-  const barMoist = el<HTMLElement>('bar-moist');
-  const barEcon = el<HTMLElement>('bar-econ');
-  const valElev = el<HTMLElement>('val-elev');
-  const valMoist = el<HTMLElement>('val-moist');
-  const valEcon = el<HTMLElement>('val-econ');
   const facilityCard = el<HTMLDivElement>('facility-card');
   const facilityDot = el<HTMLElement>('facility-dot');
   const facilityName = el<HTMLElement>('facility-name');
@@ -162,21 +174,30 @@ export function createHud(handlers: HudHandlers): Hud {
   const garageMoney = el<HTMLElement>('garage-money');
   const garageBody = el<HTMLDivElement>('garage-body');
 
-  const confirmModal = el<HTMLDivElement>('confirm-modal');
-  const confirmBackdrop = el<HTMLDivElement>('confirm-backdrop');
-  const confirmClose = el<HTMLButtonElement>('confirm-close');
-  const confirmTitle = el<HTMLElement>('confirm-title');
-  const confirmSub = el<HTMLElement>('confirm-sub');
-  const confirmText = el<HTMLElement>('confirm-text');
-  const confirmCancel = el<HTMLButtonElement>('confirm-cancel');
-  const confirmOk = el<HTMLButtonElement>('confirm-ok');
-
   const tutorialButton = el<HTMLButtonElement>('tutorial-button');
   const tutorialModal = el<HTMLDivElement>('tutorial-modal');
   const tutorialBackdrop = el<HTMLDivElement>('tutorial-backdrop');
   const tutorialClose = el<HTMLButtonElement>('tutorial-close');
   const tutorialStart = el<HTMLButtonElement>('tutorial-start');
   const tutorialCard = el<HTMLDivElement>('tutorial-card');
+
+  const startModal = el<HTMLDivElement>('start-modal');
+  const startCard = el<HTMLDivElement>('start-card');
+  const startSeed = el<HTMLInputElement>('start-seed');
+  const startRandom = el<HTMLButtonElement>('start-random');
+  const startCultures = el<HTMLDivElement>('start-cultures');
+  const startSizes = el<HTMLDivElement>('start-sizes');
+  const startMoisture = el<HTMLInputElement>('start-moisture');
+  const startElevation = el<HTMLInputElement>('start-elevation');
+  const startMoistureVal = el<HTMLElement>('start-moisture-val');
+  const startElevationVal = el<HTMLElement>('start-elevation-val');
+  const startPreview = el<HTMLCanvasElement>('start-preview');
+  const startPreviewMeta = el<HTMLElement>('start-preview-meta');
+  const startSampleNames = el<HTMLElement>('start-sample-names');
+  const startContinue = el<HTMLButtonElement>('start-continue');
+  const startGo = el<HTMLButtonElement>('start-go');
+  const startHint = el<HTMLElement>('start-hint');
+  const startSaveBadge = el<HTMLElement>('start-save-badge');
 
   /* ------------------------------ 状态 ------------------------------ */
 
@@ -199,9 +220,12 @@ export function createHud(handlers: HudHandlers): Hud {
   let stopDragIndex: number | null = null;
   let garageOpen = false;
   let garagePreferredLineId: number | null = null;
-  let confirmOpen = false;
-  let confirmResolve: ((ok: boolean) => void) | null = null;
   let tutorialOpen = false;
+  let startOpen = false;
+  let startSize: MapSize = 'small';
+  let startCulture: NameCulture = 'chinese';
+  let startHasSave = false;
+  let startPreviewTimer = 0;
   const lineColorButtons: { button: HTMLButtonElement; color: number; css: string }[] = [];
 
   // 站型选择条由数据生成，避免和 stations.ts 的造价 / 半径出现漂移
@@ -251,68 +275,6 @@ export function createHud(handlers: HudHandlers): Hud {
     lineColorButtons.push({ button, color: option.color, css: option.css });
   }
 
-  /* ------------------------------ 确认框 ------------------------------ */
-
-  interface ConfirmOptions {
-    title: string;
-    sub: string;
-    message: string;
-    okText: string;
-  }
-
-  /** 关闭确认框并回传结果；重复调用不会重复 resolve。 */
-  function closeConfirm(ok: boolean): void {
-    if (!confirmOpen) return;
-    confirmOpen = false;
-    confirmModal.classList.add('hidden');
-    const resolve = confirmResolve;
-    confirmResolve = null;
-    resolve?.(ok);
-  }
-
-  function askConfirm(options: ConfirmOptions): Promise<boolean> {
-    if (confirmOpen) closeConfirm(false);
-    confirmOpen = true;
-    confirmTitle.textContent = options.title;
-    confirmSub.textContent = options.sub;
-    confirmText.textContent = options.message;
-    confirmOk.textContent = options.okText;
-    confirmModal.classList.remove('hidden');
-    confirmOk.focus();
-    return new Promise((resolve) => {
-      confirmResolve = resolve;
-    });
-  }
-
-  confirmCancel.addEventListener('click', () => closeConfirm(false));
-  confirmClose.addEventListener('click', () => closeConfirm(false));
-  confirmBackdrop.addEventListener('click', () => closeConfirm(false));
-  confirmOk.addEventListener('click', () => closeConfirm(true));
-
-  /** 重新生成必然清空存档，先让玩家确认。 */
-  function requestRegenerate(seedText: string): void {
-    const cleaned = seedText.trim();
-    void askConfirm({
-      title: '重新生成地图？',
-      sub: '清空存档',
-      message: `用种子「${cleaned || '随机'}」重新生成，并删除当前存档。`,
-      okText: '清空并生成',
-    }).then((ok) => {
-      if (ok) handlers.regenerate(seedText);
-    });
-  }
-
-  function requestRandomSeed(): void {
-    void askConfirm({
-      title: '随机种子重开？',
-      sub: '清空存档',
-      message: '随机生成新地图，并删除当前存档。',
-      okText: '清空并生成',
-    }).then((ok) => {
-      if (ok) handlers.randomSeed();
-    });
-  }
-
   /* ------------------------------ 教程 ------------------------------ */
 
   function openTutorial(): void {
@@ -334,19 +296,234 @@ export function createHud(handlers: HudHandlers): Hud {
   tutorialClose.addEventListener('click', closeTutorial);
   tutorialStart.addEventListener('click', closeTutorial);
 
-  /* ------------------------------ 顶栏 / 种子 ------------------------------ */
+  /* ------------------------------ 开始界面 ------------------------------ */
 
-  el<HTMLButtonElement>('regenerate').addEventListener('click', () =>
-    requestRegenerate(seedInput.value),
-  );
-  el<HTMLButtonElement>('random-seed').addEventListener('click', requestRandomSeed);
-  seedInput.addEventListener('keydown', (event) => {
+  const startCultureButtons: { button: HTMLButtonElement; id: NameCulture }[] = [];
+  for (const culture of NAME_CULTURES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'start-option';
+    button.dataset.culture = culture.id;
+    button.textContent = culture.label;
+    button.title = culture.label;
+    button.addEventListener('click', () => {
+      startCulture = culture.id;
+      updateStartOptions();
+      scheduleStartPreview(0);
+    });
+    startCultures.append(button);
+    startCultureButtons.push({ button, id: culture.id });
+  }
+
+  const startSizeButtons: { button: HTMLButtonElement; id: MapSize }[] = [];
+  for (const size of ['small', 'medium', 'large'] as MapSize[]) {
+    const preset = MAP_SIZE_PRESETS[size];
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'start-option';
+    button.dataset.size = size;
+    button.textContent = preset.label;
+    button.title = preset.hint;
+    button.addEventListener('click', () => {
+      startSize = size;
+      updateStartOptions();
+      scheduleStartPreview(0);
+    });
+    startSizes.append(button);
+    startSizeButtons.push({ button, id: size });
+  }
+
+  function seedValue(text: string): number {
+    const trimmed = text.trim();
+    if (/^\d{1,10}$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      if (Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= 0xffffffff) {
+        return numeric >>> 0;
+      }
+    }
+    return hashSeed(trimmed || '0');
+  }
+
+  function randomStartSeed(): number {
+    return 100000 + Math.floor(Math.random() * 900000);
+  }
+
+  function clampPercent(value: number): number {
+    return Math.max(-20, Math.min(20, Math.round(value)));
+  }
+
+  function offsetLabel(value: string): string {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric === 0) return '0%';
+    return `${numeric > 0 ? '+' : ''}${numeric}%`;
+  }
+
+  function updateStartOptions(): void {
+    for (const { button, id } of startCultureButtons) {
+      button.classList.toggle('is-active', id === startCulture);
+    }
+    for (const { button, id } of startSizeButtons) {
+      button.classList.toggle('is-active', id === startSize);
+    }
+    startMoistureVal.textContent = offsetLabel(startMoisture.value);
+    startElevationVal.textContent = offsetLabel(startElevation.value);
+  }
+
+  function scheduleStartPreview(delay = 120): void {
+    if (!startOpen) return;
+    window.clearTimeout(startPreviewTimer);
+    startPreviewTimer = window.setTimeout(() => {
+      startPreviewTimer = 0;
+      renderStartPreview();
+    }, delay);
+  }
+
+  function renderStartPreview(): void {
+    if (!startOpen) return;
+    const preset = MAP_SIZE_PRESETS[startSize];
+    const seed = seedValue(startSeed.value);
+    try {
+      const world = generateWorld({
+        seed,
+        radius: preset.radius,
+        elevationOffset: Number(startElevation.value) / 100,
+        moistureOffset: Number(startMoisture.value) / 100,
+        culture: startCulture,
+      });
+      drawStartPreview(world);
+      const names = world.blobs
+        .filter((blob) => blob.kind === 'town')
+        .slice(0, 3)
+        .map((blob) => blob.name);
+      const samples = names.length > 0
+        ? names
+        : world.blobs.slice(0, 3).map((blob) => blob.name);
+      startPreviewMeta.textContent = `${preset.label}地图 · ${world.stats.total} 格`;
+      startSampleNames.textContent = samples.length > 0 ? `地名示例：${samples.join(' · ')}` : '';
+    } catch (error) {
+      console.warn('[RailSim] 预览生成失败', error);
+      startPreviewMeta.textContent = '预览生成失败';
+      startSampleNames.textContent = '';
+    }
+  }
+
+  function drawStartPreview(world: World): void {
+    const ctx = startPreview.getContext('2d');
+    if (!ctx) return;
+
+    const width = startPreview.width;
+    const height = startPreview.height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#07141c';
+    ctx.fillRect(0, 0, width, height);
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const tile of world.list) {
+      if (tile.x < minX) minX = tile.x;
+      if (tile.y < minY) minY = tile.y;
+      if (tile.x > maxX) maxX = tile.x;
+      if (tile.y > maxY) maxY = tile.y;
+    }
+    if (!Number.isFinite(minX)) return;
+
+    minX -= HEX_SIZE;
+    minY -= HEX_SIZE;
+    maxX += HEX_SIZE;
+    maxY += HEX_SIZE;
+
+    const padding = 14;
+    const scale = Math.min(
+      (width - padding * 2) / Math.max(1, maxX - minX),
+      (height - padding * 2) / Math.max(1, maxY - minY),
+    );
+    const offsetX = (width - (maxX - minX) * scale) / 2 - minX * scale;
+    const offsetY = (height - (maxY - minY) * scale) / 2 - minY * scale;
+    const radius = HEX_SIZE * scale * 1.01;
+    const corners = hexCorners(radius);
+
+    for (const tile of world.list) {
+      const cx = offsetX + tile.x * scale;
+      const cy = offsetY + tile.y * scale;
+      ctx.beginPath();
+      for (let i = 0; i < corners.length; i++) {
+        const point = corners[i]!;
+        if (i === 0) ctx.moveTo(cx + point.x, cy + point.y);
+        else ctx.lineTo(cx + point.x, cy + point.y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = TERRAIN_DEFS[tile.terrain].colorCss;
+      ctx.fill();
+    }
+  }
+
+  function openStartScreen(defaults: StartScreenDefaults): void {
+    startOpen = true;
+    startHasSave = defaults.hasSave;
+    startSize = defaults.size;
+    startCulture = defaults.culture;
+    startSeed.value = defaults.seedText;
+    startMoisture.value = String(clampPercent(defaults.moistureOffset * 100));
+    startElevation.value = String(clampPercent(defaults.elevationOffset * 100));
+    startContinue.classList.toggle('hidden', !startHasSave);
+    startSaveBadge.classList.toggle('hidden', !startHasSave);
+    startHint.textContent = startHasSave
+      ? '开始游戏会用新地图覆盖当前存档'
+      : '选择设置后开始新游戏';
+    updateStartOptions();
+    startModal.classList.remove('hidden');
+    startCard.focus();
+    scheduleStartPreview(0);
+  }
+
+  function closeStartScreen(): void {
+    if (!startOpen) return;
+    startOpen = false;
+    startModal.classList.add('hidden');
+    window.clearTimeout(startPreviewTimer);
+    startPreviewTimer = 0;
+  }
+
+  startSeed.addEventListener('input', () => scheduleStartPreview());
+  startSeed.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      requestRegenerate(seedInput.value);
-      seedInput.blur();
+      startGo.click();
     }
   });
+  startRandom.addEventListener('click', () => {
+    startSeed.value = String(randomStartSeed());
+    scheduleStartPreview(0);
+  });
+  startMoisture.addEventListener('input', () => {
+    updateStartOptions();
+    scheduleStartPreview();
+  });
+  startElevation.addEventListener('input', () => {
+    updateStartOptions();
+    scheduleStartPreview();
+  });
+  startGo.addEventListener('click', () => {
+    const seedText = startSeed.value.trim() || String(randomStartSeed());
+    startSeed.value = seedText;
+    const settings: StartSettings = {
+      seedText,
+      size: startSize,
+      culture: startCulture,
+      elevationOffset: Number(startElevation.value) / 100,
+      moistureOffset: Number(startMoisture.value) / 100,
+    };
+    closeStartScreen();
+    handlers.startNewGame(settings);
+  });
+  startContinue.addEventListener('click', () => {
+    closeStartScreen();
+    handlers.continueGame();
+  });
+
+  /* ------------------------------ 顶栏 ------------------------------ */
 
   el<HTMLButtonElement>('zoom-in').addEventListener('click', () => handlers.zoom(1.25));
   el<HTMLButtonElement>('zoom-out').addEventListener('click', () => handlers.zoom(0.8));
@@ -429,17 +606,17 @@ export function createHud(handlers: HudHandlers): Hud {
   window.addEventListener('keydown', (event) => {
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (isTypingTarget()) return;
+    if (startOpen) return;
     const key = event.key.toLowerCase();
 
     if (key === 'escape') {
-      if (confirmOpen) closeConfirm(false);
-      else if (tutorialOpen) closeTutorial();
+      if (tutorialOpen) closeTutorial();
       else if (garageOpen) closeGarage();
       else if (lineDraft) handlers.cancelLineEditor();
       return;
     }
 
-    if (confirmOpen || tutorialOpen) return;
+    if (tutorialOpen) return;
 
     if (event.code === 'Space' || key === ' ') {
       applySpeed(currentSpeed === 0 ? resumeSpeed : 0);
@@ -459,9 +636,6 @@ export function createHud(handlers: HudHandlers): Hud {
     } else if (key === 'f') {
       handlers.fit();
       event.preventDefault();
-    } else if (key === 'g') {
-      requestRegenerate(seedInput.value);
-      event.preventDefault();
     } else if (key === '+' || key === '=') {
       handlers.zoom(1.25);
       event.preventDefault();
@@ -479,7 +653,6 @@ export function createHud(handlers: HudHandlers): Hud {
     worldLand.textContent = `${Math.round((world.stats.land / world.stats.total) * 100)}%`;
     worldTowns.textContent = `${world.stats.townBlobs} 片`;
     worldIndustry.textContent = `${world.stats.industryBlobs} 片`;
-    seedInput.value = String(world.seed);
 
     legend.replaceChildren();
     for (const def of TERRAIN_LIST) {
@@ -572,7 +745,7 @@ export function createHud(handlers: HudHandlers): Hud {
 
     const signature =
       tooltip.kind === 'station'
-        ? `s|${tooltip.station.key}|${tooltip.station.waiting}|${tooltip.station.transferring}|${tooltip.station.dailyDemand}|${tooltip.station.avgEcon.toFixed(3)}|${tooltip.station.econFactor.toFixed(3)}|${tooltip.station.cargoWaiting}|${tooltip.station.generatedToday}|${tooltip.station.boardedToday}|${tooltip.station.deliveredToday}|${tooltip.station.gaveUpToday}|${tooltip.station.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.station.destinations.map((item) => `${item.name}:${item.count}`).join(',')}|${tooltip.station.lines.map((line) => line.name).join(',')}`
+        ? `s|${tooltip.station.key}|${tooltip.station.waiting}|${tooltip.station.transferring}|${tooltip.station.dailyDemand}|${tooltip.station.demandFactor}|${tooltip.station.cargoWaiting}|${tooltip.station.generatedToday}|${tooltip.station.boardedToday}|${tooltip.station.deliveredToday}|${tooltip.station.gaveUpToday}|${tooltip.station.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.station.destinations.map((item) => `${item.name}:${item.count}`).join(',')}|${tooltip.station.lines.map((line) => line.name).join(',')}`
         : tooltip.kind === 'truck'
           ? `k|${tooltip.truck.id}|${tooltip.truck.state}|${tooltip.truck.loaded}|${tooltip.truck.order?.originName ?? ''}|${tooltip.truck.order?.destName ?? ''}|${tooltip.truck.order?.amount ?? 0}|${tooltip.truck.order?.reward ?? 0}|${tooltip.truck.revenueToday}|${tooltip.truck.deliveriesToday}|${tooltip.truck.opexToday}|${tooltip.truck.opexTotal}`
           : `t|${tooltip.train.id}|${tooltip.train.lineName}|${tooltip.train.state}|${tooltip.train.speed}|${tooltip.train.onboard}|${tooltip.train.carLoads.join(',')}|${tooltip.train.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.train.nextStopName}|${tooltip.train.revenueToday}|${tooltip.train.deliveredToday}|${tooltip.train.opexToday}|${tooltip.train.opexTotal}|${tooltip.train.destinations.map((item) => `${item.name}:${item.count}`).join(',')}`;
@@ -616,7 +789,7 @@ export function createHud(handlers: HudHandlers): Hud {
         } else {
           mapTooltip.append(
             tipSub(
-              `日需求 ${station.dailyDemand} 人 · 经济 ×${station.econFactor.toFixed(2)} · 覆盖 ${station.coverage} / ${station.demandTiles} 格`,
+              `日需求 ${station.dailyDemand} 人 · 客流因子 ×${station.demandFactor.toFixed(2)} · 覆盖 ${station.coverage} / ${station.demandTiles} 格`,
             ),
           );
           mapTooltip.append(tipRow('候车', `${station.waiting} 人${station.transferring > 0 ? `（换乘 ${station.transferring}）` : ''}`));
@@ -816,16 +989,6 @@ export function createHud(handlers: HudHandlers): Hud {
       : info.coveredBy > 0
         ? `${info.coveredBy} 站覆盖`
         : '未覆盖';
-
-    const elev = Math.round(tile.elevation * 100);
-    const moist = Math.round(tile.moisture * 100);
-    const econ = Math.round(tile.econ * 100);
-    barElev.style.width = `${elev}%`;
-    barMoist.style.width = `${moist}%`;
-    barEcon.style.width = `${econ}%`;
-    valElev.textContent = (elev / 100).toFixed(2);
-    valMoist.textContent = `${moist}%`;
-    valEcon.textContent = `${econ}%`;
 
     renderFacility(info);
     renderActions(info);
@@ -1489,11 +1652,7 @@ export function createHud(handlers: HudHandlers): Hud {
   }
 
   function setZoom(zoom: number): void {
-    zoomReadout.textContent = `每格 ≈ 5 km · 视图 ${Math.round(zoom * 100)}%`;
-  }
-
-  function setSeed(seed: number): void {
-    seedInput.value = String(seed);
+    zoomReadout.textContent = `视图 ${Math.round(zoom * 100)}%`;
   }
 
   function selectTool(tool: BuildTool, announce: boolean): void {
@@ -1557,7 +1716,7 @@ export function createHud(handlers: HudHandlers): Hud {
   });
 
   function setZoomReadoutDefault(): void {
-    zoomReadout.textContent = '每格 ≈ 5 km';
+    zoomReadout.textContent = '视图 —';
   }
 
   return {
@@ -1570,12 +1729,13 @@ export function createHud(handlers: HudHandlers): Hud {
     refreshSelected,
     hoverTile: setHovered,
     setZoom,
-    setSeed,
     setTool: (tool) => selectTool(tool, false),
     setStationType: (type) => applyStationType(type, false),
     openLineEditor,
     closeLineEditor,
     addDraftStop,
+    openStartScreen,
+    openTutorial,
     toast,
   };
 }

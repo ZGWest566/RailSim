@@ -27,15 +27,6 @@
           </div>
         </div>
 
-        <div class="seed-bar">
-          <label class="seed-field" for="seed-input">
-            <span>种子</span>
-            <input id="seed-input" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" aria-label="地图种子" />
-          </label>
-          <button class="btn btn-ghost" id="regenerate" title="重新生成地图（G）">重新生成</button>
-          <button class="btn btn-icon" id="random-seed" title="随机种子" aria-label="随机种子">⟳</button>
-        </div>
-
         <div class="topbar-right">
           <div class="chip">
             <span>资金</span>
@@ -185,30 +176,11 @@
             </div>
           </div>
 
-          <div class="meters">
-            <div class="meter">
-              <span>海拔</span>
-              <div class="bar"><i id="bar-elev"></i></div>
-              <em id="val-elev">0.00</em>
-            </div>
-            <div class="meter">
-              <span>湿度</span>
-              <div class="bar"><i id="bar-moist"></i></div>
-              <em id="val-moist">0%</em>
-            </div>
-            <div class="meter">
-              <span>经济带</span>
-              <div class="bar"><i id="bar-econ"></i></div>
-              <em id="val-econ">0%</em>
-            </div>
-          </div>
-
           <dl class="kv">
             <div><dt>需求</dt><dd id="tile-demand">—</dd></div>
             <div><dt>轨道</dt><dd id="tile-track">未铺设</dd></div>
             <div><dt>车站</dt><dd id="tile-station">无</dd></div>
             <div><dt>覆盖</dt><dd id="tile-coverage">未覆盖</dd></div>
-            <div><dt>每格距离</dt><dd>≈ 5 km</dd></div>
           </dl>
 
           <div class="inspector-actions">
@@ -247,7 +219,7 @@
         </div>
 
         <div class="dock-right">
-          <span class="scale-readout" id="zoom-readout">每格 ≈ 5 km</span>
+          <span class="scale-readout" id="zoom-readout">视图 —</span>
           <div class="zoom-group" role="group" aria-label="地图缩放">
             <button class="btn btn-icon" id="zoom-out" title="缩小" aria-label="缩小">−</button>
             <button class="btn btn-icon" id="zoom-in" title="放大" aria-label="放大">＋</button>
@@ -281,23 +253,68 @@
         </div>
       </div>
 
-      <div class="modal hidden" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-        <div class="modal-backdrop" id="confirm-backdrop"></div>
-        <div class="modal-card confirm-card">
+      <div class="modal hidden" id="start-modal" role="dialog" aria-modal="true" aria-labelledby="start-title">
+        <div class="modal-backdrop" id="start-backdrop"></div>
+        <div class="modal-card start-card" id="start-card" tabindex="-1">
           <div class="modal-head">
             <div>
-              <h2 id="confirm-title">重新生成地图？</h2>
-              <p class="panel-sub" id="confirm-sub">清空存档</p>
+              <h2 id="start-title">开始游戏</h2>
+              <p class="panel-sub">新建地图</p>
             </div>
-            <button class="btn btn-icon" id="confirm-close" aria-label="取消">×</button>
+            <span class="start-save-badge hidden" id="start-save-badge">已有存档</span>
           </div>
-          <div class="confirm-body">
-            <p class="confirm-text" id="confirm-text"></p>
-            <p class="confirm-warn">将删除存档并重置全部进度，无法撤销。</p>
+
+          <div class="start-body">
+            <div class="start-preview-panel">
+              <canvas id="start-preview" width="560" height="440" aria-label="地图预览"></canvas>
+              <p class="start-preview-meta" id="start-preview-meta">生成预览…</p>
+              <p class="start-sample-names" id="start-sample-names"></p>
+            </div>
+
+            <div class="start-settings">
+              <label class="start-field">
+                <span>种子</span>
+                <div class="start-seed-row">
+                  <input
+                    id="start-seed"
+                    type="text"
+                    inputmode="numeric"
+                    spellcheck="false"
+                    autocomplete="off"
+                    aria-label="地图种子"
+                  />
+                  <button class="btn btn-icon" id="start-random" title="随机种子" aria-label="随机种子">⟳</button>
+                </div>
+              </label>
+
+              <div class="start-field">
+                <span>地名文化</span>
+                <div class="start-options" id="start-cultures"></div>
+              </div>
+
+              <div class="start-field">
+                <span>地图大小</span>
+                <div class="start-options" id="start-sizes"></div>
+              </div>
+
+              <label class="start-slider">
+                <span>湿度偏移</span>
+                <input id="start-moisture" type="range" min="-20" max="20" step="1" value="0" />
+                <em id="start-moisture-val">0%</em>
+              </label>
+
+              <label class="start-slider">
+                <span>海拔偏移</span>
+                <input id="start-elevation" type="range" min="-20" max="20" step="1" value="0" />
+                <em id="start-elevation-val">0%</em>
+              </label>
+            </div>
           </div>
-          <div class="confirm-actions">
-            <button class="btn" id="confirm-cancel">取消</button>
-            <button class="btn btn-danger" id="confirm-ok">清空存档并生成</button>
+
+          <div class="start-actions">
+            <p class="start-hint" id="start-hint">选择设置后开始游戏</p>
+            <button class="btn hidden" id="start-continue">继续游戏</button>
+            <button class="btn btn-primary" id="start-go">开始游戏</button>
           </div>
         </div>
       </div>

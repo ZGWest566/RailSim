@@ -231,10 +231,8 @@ export interface StationFlowView {
   waiting: number;
   transferring: number;
   dailyDemand: number;
-  /** 覆盖范围内有需求地块的平均经济带值 0–1。 */
-  avgEcon: number;
-  /** 由平均经济带换算出的客流系数。 */
-  econFactor: number;
+  /** 服务范围内所有地块客流因子的平均值。 */
+  demandFactor: number;
   /** 本站作为起点的待运货单数（货运站）。 */
   cargoWaiting: number;
   generatedToday: number;
@@ -410,18 +408,14 @@ const DISTANCE_BUDGET_DETOUR = 1.5;
 const DISTANCE_BUDGET_MINUTES_PER_HEX =
   ((SQRT3 * HEX_SIZE) / BUDGET_REFERENCE_SPEED) * MINUTES_PER_SECOND * DISTANCE_BUDGET_DETOUR;
 
-/* ------------------------------ 经济带系数 ------------------------------ */
+/* ------------------------------ 地区客流因子 ------------------------------ */
 
 /**
- * 经济带系数：
- * - econ < 0.35：0（完全没有客流）
- * - econ 0.35 → 0.50：线性 0 → 2.0
- * - 继续按同一斜率增长，最高 2.5（econ 约 0.5375 后封顶）
+ * 客流因子按车站所在地块类型判定，不再与 econ 绑定：
+ * - 城镇：轻轨站 3.5，其他客运站 2.5
+ * - 工业区 2.0 / 郊区 1.5 / 农田 1.0
+ * - 荒地、山地、水域 0
  */
-const ECON_ZERO_BELOW = 0.35;
-const ECON_MID = 0.5;
-const ECON_FACTOR_AT_MID = 2.0;
-const ECON_FACTOR_MAX = 2.5;
 
 export interface StationFlow {
   key: string;
@@ -1311,7 +1305,13 @@ export class RailOperations {
     }
   }
 
-  private flowFor(station: { q: number; r: number; type: StationType; coverage: Tile[] }): StationFlow {
+  private flowFor(station: {
+    q: number;
+    r: number;
+    type: StationType;
+    tile: Tile;
+    coverage: Tile[];
+  }): StationFlow {
     const key = hexKey(station.q, station.r);
     let flow = this.flowMap.get(key);
     if (!flow) {
@@ -1487,29 +1487,38 @@ export class RailOperations {
     return station ? this.flowFor(station) : null;
   }
 
-  /** 日均乘客：车站基础量 × 区域平均经济带系数；低经济区直接为 0。 */
+  /** 日均乘客：车站基础量 × 服务范围内地块客流因子的平均值。 */
   private dailyDemandFor(station: { type: StationType; coverage: Tile[] }): number {
     const base = STATION_DEFS[station.type].dailyDemand;
     if (base <= 0) return 0;
-    const factor = this.econFactorFor(station);
+    const factor = this.regionFactorFor(station);
     if (factor <= 0) return 0;
     return Math.max(1, Math.round(base * factor));
   }
 
-  /** 区域平均经济带换算出的客流系数；0.35 以下为 0，0.50 时为 2.0，上限 2.5。 */
-  private econFactorFor(station: { coverage: Tile[] }): number {
-    const avgEcon = this.averageEconFor(station);
-    if (avgEcon < ECON_ZERO_BELOW) return 0;
-    const slope = ECON_FACTOR_AT_MID / (ECON_MID - ECON_ZERO_BELOW);
-    return Math.min(ECON_FACTOR_MAX, (avgEcon - ECON_ZERO_BELOW) * slope);
+  /** 服务范围内所有地块因子的算术平均；城镇地块的因子取决于车站类型。 */
+  private regionFactorFor(station: { type: StationType; coverage: Tile[] }): number {
+    if (station.type === 'freight' || station.coverage.length === 0) return 0;
+    let total = 0;
+    for (const tile of station.coverage) {
+      total += this.terrainDemandFactor(tile.terrain, station.type);
+    }
+    return total / station.coverage.length;
   }
 
-  /** 区域平均经济带值（只统计有需求的覆盖地块），用于检视 / 说明。 */
-  private averageEconFor(station: { coverage: Tile[] }): number {
-    const demandTiles = station.coverage.filter((tile) => isDemandTile(tile));
-    const sample = demandTiles.length > 0 ? demandTiles : station.coverage;
-    if (sample.length === 0) return 0;
-    return sample.reduce((sum, tile) => sum + tile.econ, 0) / sample.length;
+  private terrainDemandFactor(terrain: Terrain, stationType: StationType): number {
+    switch (terrain) {
+      case Terrain.Town:
+        return stationType === 'light' ? 3.5 : 2.5;
+      case Terrain.Industry:
+        return 2.0;
+      case Terrain.Suburb:
+        return 1.5;
+      case Terrain.Farmland:
+        return 1.0;
+      default:
+        return 0;
+    }
   }
 
   /** 到站下客：终点乘客结算票款，换乘乘客进入站内候车。 */
@@ -2817,8 +2826,7 @@ export class RailOperations {
       waiting: waiting.length,
       transferring,
       dailyDemand: flow.dailyDemand,
-      avgEcon: this.averageEconFor(station),
-      econFactor: this.econFactorFor(station),
+      demandFactor: this.regionFactorFor(station),
       cargoWaiting: this.cargoWaitingAt(key),
       generatedToday: flow.generatedToday,
       boardedToday: flow.boardedToday,

@@ -2,14 +2,24 @@
 
 import type { NetworkSave } from './network';
 import type { OperationsSave } from './operations';
+import type { NameCulture } from './names';
 
 export const SAVE_KEY = 'railsim.save.v1';
 export const SAVE_VERSION = 1;
+
+export interface SaveMapSettings {
+  radius: number;
+  elevationOffset: number;
+  moistureOffset: number;
+  culture: NameCulture;
+}
 
 export interface SaveGame {
   version: number;
   savedAt: number;
   seed: number;
+  /** 地图生成设置；旧存档没有此字段时按默认小地图 / 中文处理。 */
+  map?: SaveMapSettings;
   network: NetworkSave;
   operations: OperationsSave;
 }

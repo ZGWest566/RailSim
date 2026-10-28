@@ -11,11 +11,18 @@ import {
 import { Perlin2D } from '../core/noise';
 import { Rng, hash2d } from '../core/rng';
 import { Terrain, isLand } from './terrain';
+import { createNamer, DEFAULT_NAME_CULTURE, type NameCulture } from './names';
 import { World, type MapBlob, type Tile } from './world';
 
 export interface MapGenOptions {
   seed: number;
   radius?: number;
+  /** 海拔偏移：正值更多陆地 / 山地，负值更多水域。 */
+  elevationOffset?: number;
+  /** 湿度偏移：正值更湿润，负值更干燥。 */
+  moistureOffset?: number;
+  /** 地名文化预设。 */
+  culture?: NameCulture;
   /** 关闭河流雕刻 */
   rivers?: boolean;
 }
@@ -33,33 +40,6 @@ const FARM_ECON_MOISTURE = 0.46;
 const FARM_ECON_MAX = 0.55;
 const SUBURB_MOISTURE = 0.47;
 
-const TOWN_PREFIX = [
-  '青石', '云溪', '北港', '白河', '松岭', '安平', '临川', '望海',
-  '丰原', '新桥', '柳湾', '南浦', '东岗', '槐安', '红叶', '双溪',
-];
-const TOWN_SUFFIX = ['镇', '镇', '城', '新区', '港'];
-const INDUSTRY_PREFIX = ['临港', '北山', '西河', '南岭', '东郊', '新城', '铁西', '云谷'];
-const INDUSTRY_SUFFIX = ['工业区', '物流园', '钢铁园', '产业园', '货运场'];
-
-function createNamer(rng: Rng): (kind: 'town' | 'industry') => string {
-  const used = new Set<string>();
-  return (kind) => {
-    for (let i = 0; i < 40; i++) {
-      const prefix = rng.pick(kind === 'town' ? TOWN_PREFIX : INDUSTRY_PREFIX);
-      const suffix = rng.pick(kind === 'town' ? TOWN_SUFFIX : INDUSTRY_SUFFIX);
-      if (prefix.endsWith(suffix.charAt(0))) continue;
-      const name = prefix + suffix;
-      if (!used.has(name)) {
-        used.add(name);
-        return name;
-      }
-    }
-    const fallback = `${kind === 'town' ? '新城区' : '新园区'} ${used.size + 1}`;
-    used.add(fallback);
-    return fallback;
-  };
-}
-
 /**
  * 三层地图生成管线：
  *
@@ -70,6 +50,9 @@ function createNamer(rng: Rng): (kind: 'town' | 'industry') => string {
 export function generateWorld(options: MapGenOptions): World {
   const seed = options.seed >>> 0;
   const radius = options.radius ?? MAP_RADIUS;
+  const elevationOffset = options.elevationOffset ?? 0;
+  const moistureOffset = options.moistureOffset ?? 0;
+  const culture = options.culture ?? DEFAULT_NAME_CULTURE;
   const world = new World(seed, radius);
   const rng = new Rng(seed);
 
@@ -78,7 +61,16 @@ export function generateWorld(options: MapGenOptions): World {
   const econNoise = new Perlin2D(rng);
   const ridgeNoise = new Perlin2D(rng);
 
-  buildMacro(world, radius, elevNoise, moistNoise, econNoise, ridgeNoise);
+  buildMacro(
+    world,
+    radius,
+    elevNoise,
+    moistNoise,
+    econNoise,
+    ridgeNoise,
+    elevationOffset,
+    moistureOffset,
+  );
   smoothCoastline(world, rng);
   growTowns(world, radius, rng);
   growIndustry(world, radius, rng);
@@ -86,7 +78,7 @@ export function generateWorld(options: MapGenOptions): World {
   if (options.rivers !== false) carveRivers(world, rng, 3);
 
   // 团块名称使用独立的随机流，避免改名字影响地图几何
-  const namer = createNamer(new Rng(seed ^ 0x51ed270b));
+  const namer = createNamer(culture, new Rng(seed ^ 0x51ed270b));
   for (const blob of world.blobs) blob.name = namer(blob.kind);
 
   world.refresh();
@@ -110,6 +102,8 @@ function buildMacro(
   moistNoise: Perlin2D,
   econNoise: Perlin2D,
   ridgeNoise: Perlin2D,
+  elevationOffset: number,
+  moistureOffset: number,
 ): void {
   for (const a of hexesInRange(ORIGIN, radius)) {
     const nx = a.q + a.r * 0.5;
@@ -119,8 +113,12 @@ function buildMacro(
 
     const base = elevNoise.fbm(nx * 0.12 + 11.3, ny * 0.12 + 7.7, 5);
     const ridge = ridgeNoise.ridged(nx * 0.18 + 3.1, ny * 0.18 + 9.4, 4);
-    const elevation = clamp01(base * 0.8 + 0.08 - edge * 0.72 + (ridge - 0.5) * 0.17);
-    const moisture = clamp01(moistNoise.fbm(nx * 0.09 + 40.2, ny * 0.09 + 13.8, 4) * 0.88 + 0.04);
+    const elevation = clamp01(
+      base * 0.8 + 0.08 - edge * 0.72 + (ridge - 0.5) * 0.17 + elevationOffset,
+    );
+    const moisture = clamp01(
+      moistNoise.fbm(nx * 0.09 + 40.2, ny * 0.09 + 13.8, 4) * 0.88 + 0.04 + moistureOffset,
+    );
     const econ = clamp01(econNoise.fbm(nx * 0.06 + 70.5, ny * 0.06 + 31.4, 3) * 0.96 + 0.02);
 
     let terrain: Terrain;
