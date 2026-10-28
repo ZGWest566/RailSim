@@ -104,8 +104,8 @@ export const TRUCK_SPEED = 42;
 /** 装货 / 卸货时间（秒）。 */
 export const TRUCK_LOAD_SECONDS = 1.2;
 export const TRUCK_UNLOAD_SECONDS = 1.2;
-/** 每个工业区每个游戏小时生成货单的概率。24 小时期望约 1.2 张。 */
-export const CARGO_ORDER_CHANCE_PER_HOUR = 0.05;
+/** 每个工业区每个游戏小时生成货单的概率。24 小时期望约 0.24 张。 */
+export const CARGO_ORDER_CHANCE_PER_HOUR = 0.01;
 /** 货单生成检查间隔（游戏分钟）。 */
 export const CARGO_ORDER_CHECK_MINUTES = 60;
 /** 全地图同时存在的货单上限。 */

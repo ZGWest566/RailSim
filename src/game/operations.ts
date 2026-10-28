@@ -230,16 +230,11 @@ export interface StationFlowView {
   type: StationType;
   waiting: number;
   transferring: number;
-  dailyDemand: number;
-  /** 服务范围内所有地块客流因子的平均值。 */
-  demandFactor: number;
   /** 本站作为起点的待运货单数（货运站）。 */
   cargoWaiting: number;
-  generatedToday: number;
   boardedToday: number;
   deliveredToday: number;
-  gaveUpToday: number;
-  generatedTotal: number;
+  boardedTotal: number;
   deliveredTotal: number;
   coverage: number;
   demandTiles: number;
@@ -408,30 +403,65 @@ const DISTANCE_BUDGET_DETOUR = 1.5;
 const DISTANCE_BUDGET_MINUTES_PER_HEX =
   ((SQRT3 * HEX_SIZE) / BUDGET_REFERENCE_SPEED) * MINUTES_PER_SECOND * DISTANCE_BUDGET_DETOUR;
 
-/* ------------------------------ 地区客流因子 ------------------------------ */
+/** 地块客流检查间隔（游戏分钟）。 */
+const DEMAND_CHECK_MINUTES = 60;
 
 /**
- * 客流因子按车站所在地块类型判定，不再与 econ 绑定：
- * - 城镇：轻轨站 3.5，其他客运站 2.5
- * - 工业区 2.0 / 郊区 1.5 / 农田 1.0
- * - 荒地、山地、水域 0
+ * 每个非荒野地块每天的期望乘客数。
+ * 客流由地块本身生成，不再按车站覆盖范围重复计算。
  */
+function tileDemandPerDay(terrain: Terrain): number {
+  switch (terrain) {
+    case Terrain.Town:
+      return 0.6;
+    case Terrain.Industry:
+      return 0.3;
+    case Terrain.Suburb:
+      return 0.2;
+    case Terrain.Farmland:
+      return 0.05;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * 线网规模系数：可达线网内服务地块的系数总和。
+ * 城镇 3.0 / 工业区 1.5 / 郊区 1.0 / 农田 0.5，水域、荒地、山地不计。
+ */
+function networkTileWeight(terrain: Terrain): number {
+  switch (terrain) {
+    case Terrain.Town:
+      return 3.0;
+    case Terrain.Industry:
+      return 1.5;
+    case Terrain.Suburb:
+      return 1.0;
+    case Terrain.Farmland:
+      return 0.5;
+    default:
+      return 0;
+  }
+}
+
+/** 每点线网系数带来的客流加成。 */
+const NETWORK_BONUS_PER_COEF = 0.01;
 
 export interface StationFlow {
   key: string;
-  dailyDemand: number;
-  /** 生成乘客的整数取整余量。 */
-  carry: number;
-  generatedToday: number;
-  generatedTotal: number;
   boardedToday: number;
   boardedTotal: number;
   deliveredToday: number;
   deliveredTotal: number;
   transferredToday: number;
   transferredTotal: number;
-  gaveUpToday: number;
-  gaveUpTotal: number;
+}
+
+interface DestinationCandidate {
+  station: Station;
+  route: { legs: PassengerLeg[]; cost: number };
+  /** 目的地车站的覆盖格数加权。 */
+  weight: number;
 }
 
 
@@ -459,7 +489,9 @@ export class RailOperations {
   private readonly cargoOrders = new Map<number, CargoOrder>();
   private readonly truckMap = new Map<number, Truck>();
   private readonly cargoTimers = new Map<number, number>();
+  private readonly demandTiles: Tile[];
   private readonly rng: Rng;
+  private demandMinuteCarry = 0;
   private cargoDispatchCooldown = 0;
   private nextLineId = 1;
   private nextTrainId = 1;
@@ -485,6 +517,7 @@ export class RailOperations {
     this.world = world;
     this.network = network;
     this.rng = new Rng(world.seed ^ 0x51ed270b);
+    this.demandTiles = world.list.filter((tile) => isDemandTile(tile));
   }
 
   get lines(): Line[] {
@@ -635,9 +668,6 @@ export class RailOperations {
     }
     for (const key of [...this.waitingByStation.keys()]) {
       if (!valid.has(key)) this.waitingByStation.delete(key);
-    }
-    for (const station of this.network.stationList) {
-      this.flowFor(station).dailyDemand = this.dailyDemandFor(station);
     }
 
     for (const line of this.lineMap.values()) {
@@ -1242,7 +1272,7 @@ export class RailOperations {
 
   /* ------------------------------ 客流 ------------------------------ */
 
-  /** 推进游戏时钟，并按日均需求生成独立乘客对象。 */
+  /** 推进游戏时钟，并按地块生成独立乘客对象。 */
   private advanceTime(dt: number): void {
     const minutes = dt * MINUTES_PER_SECOND;
     this.minuteOfDay += minutes;
@@ -1252,29 +1282,10 @@ export class RailOperations {
       this.resetDaily();
     }
 
-    const days = minutes / MINUTES_PER_DAY;
-    for (const station of this.network.stationList) {
-      if (station.type === 'freight') continue;
-      const flow = this.flowFor(station);
-      const key = hexKey(station.q, station.r);
-      if (flow.dailyDemand <= 0) continue;
-      if (this.waitingAt(key).length >= MAX_WAITING) continue;
-
-      flow.carry += flow.dailyDemand * days;
-      const whole = Math.floor(flow.carry);
-      if (whole <= 0) continue;
-      flow.carry -= whole;
-
-      let accepted = 0;
-      for (let i = 0; i < whole; i++) {
-        if (this.waitingAt(key).length >= MAX_WAITING) break;
-        const passenger = this.spawnPassenger(station, flow);
-        if (!passenger) continue;
-        this.waitingAt(key).push(passenger);
-        accepted += 1;
-      }
-      flow.generatedToday += accepted;
-      flow.generatedTotal += accepted;
+    this.demandMinuteCarry += minutes;
+    while (this.demandMinuteCarry >= DEMAND_CHECK_MINUTES) {
+      this.demandMinuteCarry -= DEMAND_CHECK_MINUTES;
+      this.advanceTileDemand();
     }
 
     this.advanceCargo(minutes);
@@ -1287,11 +1298,9 @@ export class RailOperations {
     this.cargoRevenueToday = 0;
     this.cargoDeliveredToday = 0;
     for (const flow of this.flowMap.values()) {
-      flow.generatedToday = 0;
       flow.boardedToday = 0;
       flow.deliveredToday = 0;
       flow.transferredToday = 0;
-      flow.gaveUpToday = 0;
     }
     for (const train of this.trainMap.values()) {
       train.revenueToday = 0;
@@ -1317,18 +1326,12 @@ export class RailOperations {
     if (!flow) {
       flow = {
         key,
-        dailyDemand: this.dailyDemandFor(station),
-        carry: 0,
-        generatedToday: 0,
-        generatedTotal: 0,
         boardedToday: 0,
         boardedTotal: 0,
         deliveredToday: 0,
         deliveredTotal: 0,
         transferredToday: 0,
         transferredTotal: 0,
-        gaveUpToday: 0,
-        gaveUpTotal: 0,
       };
       this.flowMap.set(key, flow);
     }
@@ -1358,78 +1361,222 @@ export class RailOperations {
     return this.waitingByStation.get(hexKey(station.q, station.r)) ?? [];
   }
 
-  /**
-   * 生成一个独立乘客：选择目的地、按覆盖地块估算步行时间、做预算过滤，
-   * 并立刻在服务图上做一次独立寻路。
-   */
-  private spawnPassenger(station: Station, flow: StationFlow): Passenger | null {
-    const originKey = hexKey(station.q, station.r);
-    const destinations = this.network.stationList.filter(
-      (item) =>
-        (item.q !== station.q || item.r !== station.r) && this.dailyDemandFor(item) > 0,
+  /** 每个游戏小时检查一次车站覆盖范围内的非荒野地块，按地块类型生成潜在乘客。 */
+  private advanceTileDemand(): void {
+    if (this.demandTiles.length < 2) return;
+
+    const passengerStationIds = new Set(
+      this.network.stationList
+        .filter((station) => station.type !== 'freight')
+        .map((station) => station.id),
     );
-    if (destinations.length === 0) return null;
+    const coveredHomes: Tile[] = [];
+    for (const tile of this.demandTiles) {
+      if (tile.servedBy.some((id) => passengerStationIds.has(id))) {
+        coveredHomes.push(tile);
+      }
+    }
+    if (coveredHomes.length === 0) return;
 
-    const weights = destinations.map((item) => Math.max(1, this.dailyDemandFor(item)));
-    const destinationPool = destinations.map((item, index) => ({ item, weight: weights[index] ?? 1 }));
-    let dest: Station | null = null;
-    let destKey = '';
-    let route: { legs: PassengerLeg[]; cost: number } | null = null;
+    const scaleFactors = this.networkScaleFactors();
+    const routeCache = new Map<string, DestinationCandidate[]>();
+    for (const home of coveredHomes) {
+      const rate = tileDemandPerDay(home.terrain);
+      if (rate <= 0) continue;
+      const homeStation = this.nearestPassengerStation(home);
+      if (!homeStation) continue;
+      const scale = scaleFactors.get(homeStation.id) ?? 1;
+      if (!this.rng.chance(Math.min(1, (rate / 24) * scale))) continue;
+      this.spawnPassengerFromTile(home, homeStation, routeCache);
+    }
+  }
 
-    // 最多尝试 3 个目的站；站点不可达则换下一个
-    for (let attempt = 0; attempt < 3 && destinationPool.length > 0; attempt++) {
-      const pick = this.rng.weightedIndex(destinationPool.map((entry) => entry.weight));
-      const candidate = destinationPool[pick]!;
-      destinationPool.splice(pick, 1);
+  /**
+   * 每个客运站在其可达线网中的客流加成。
+   *
+   * 可达线网 = 通过已配车且状态正常的线路连通的客运站集合；
+   * 把集合内所有车站服务地块（去重）的线网系数相加，再换算成 `1 + 总和 × 0.01`。
+   * 网络越大，可达地点越多，选择铁路出行的人越多。
+   */
+  private networkScaleFactors(): Map<number, number> {
+    const factors = new Map<number, number>();
+    const passengerStations = this.network.stationList.filter(
+      (station) => station.type !== 'freight',
+    );
+    if (passengerStations.length === 0) return factors;
 
-      const candidateKey = hexKey(candidate.item.q, candidate.item.r);
-      const candidateRoute = this.findPassengerRoute(originKey, candidateKey);
-      if (!candidateRoute) continue;
-      dest = candidate.item;
-      destKey = candidateKey;
-      route = candidateRoute;
+    const byKey = new Map<string, Station>();
+    for (const station of passengerStations) {
+      byKey.set(hexKey(station.q, station.r), station);
+    }
+
+    const adjacency = new Map<string, Set<string>>();
+    const link = (a: string, b: string): void => {
+      let listA = adjacency.get(a);
+      if (!listA) {
+        listA = new Set<string>();
+        adjacency.set(a, listA);
+      }
+      let listB = adjacency.get(b);
+      if (!listB) {
+        listB = new Set<string>();
+        adjacency.set(b, listB);
+      }
+      listA.add(b);
+      listB.add(a);
+    };
+
+    for (const line of this.lines) {
+      if (line.status !== 'OK' || line.stopDistances.length < 2) continue;
+      if (!this.lineHasService(line)) continue;
+      const keys = line.stops
+        .map((stop) => stop.key)
+        .filter((key) => byKey.has(key));
+      for (let i = 1; i < keys.length; i++) link(keys[i - 1]!, keys[i]!);
+      if (line.isLoop && keys.length > 2) link(keys[keys.length - 1]!, keys[0]!);
+    }
+
+    const visited = new Set<string>();
+    for (const startKey of byKey.keys()) {
+      if (visited.has(startKey)) continue;
+      const queue = [startKey];
+      visited.add(startKey);
+      const members: Station[] = [];
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        const station = byKey.get(current);
+        if (station) members.push(station);
+        for (const next of adjacency.get(current) ?? []) {
+          if (visited.has(next)) continue;
+          visited.add(next);
+          queue.push(next);
+        }
+      }
+
+      // 同一格可能被多个车站覆盖，只计一次
+      const seenTiles = new Set<string>();
+      let coefficient = 0;
+      for (const station of members) {
+        for (const tile of station.coverage) {
+          const key = hexKey(tile.q, tile.r);
+          if (seenTiles.has(key)) continue;
+          seenTiles.add(key);
+          coefficient += networkTileWeight(tile.terrain);
+        }
+      }
+
+      const factor = 1 + coefficient * NETWORK_BONUS_PER_COEF;
+      for (const station of members) factors.set(station.id, factor);
+    }
+
+    return factors;
+  }
+
+  /**
+   * 从地块生成一个乘客：步行到最近车站，再从所有可达车站中按覆盖格数加权选择目的地。
+   */
+  private spawnPassengerFromTile(
+    home: Tile,
+    homeStation: Station,
+    routeCache: Map<string, DestinationCandidate[]>,
+  ): void {
+    const homeKey = hexKey(homeStation.q, homeStation.r);
+    if (this.waitingAt(homeKey).length >= MAX_WAITING) return;
+
+    const candidates = this.destinationCandidates(homeStation, routeCache);
+    if (candidates.length === 0) return;
+
+    const walkToStation = hexDistance(home, homeStation.tile) * WALK_MINUTES_PER_HEX;
+    const kind = passengerKindFor(home.terrain);
+    const baseBudget = PASSENGER_BUDGET[kind] * this.rng.range(0.8, 1.4);
+    const weights = candidates.map((candidate) => candidate.weight);
+
+    let chosen: DestinationCandidate | null = null;
+    let budget = 0;
+    let expectedCost = 0;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const index = this.rng.weightedIndex(weights);
+      const candidate = candidates[index];
+      if (!candidate || (weights[index] ?? 0) <= 0) continue;
+
+      const distanceBudget =
+        hexDistance(home, candidate.station.tile) * DISTANCE_BUDGET_MINUTES_PER_HEX;
+      const candidateBudget = Math.round(baseBudget + distanceBudget);
+      const cost = walkToStation + candidate.route.cost;
+      if (cost > candidateBudget) {
+        weights[index] = 0;
+        continue;
+      }
+
+      chosen = candidate;
+      budget = candidateBudget;
+      expectedCost = cost;
       break;
     }
 
-    if (!dest || !route) {
-      flow.gaveUpToday += 1;
-      flow.gaveUpTotal += 1;
-      return null;
-    }
+    if (!chosen) return;
 
-    const homes = station.coverage.filter((tile) => isDemandTile(tile));
-    const home = homes.length > 0 ? homes[this.rng.int(homes.length)]! : station.tile;
-    const walkMinutes = hexDistance(home, station.tile) * WALK_MINUTES_PER_HEX;
-    const kind = passengerKindFor(home.terrain);
-    // 基础预算保留个人差异；路程预算按起终点直线距离补充，不随随机系数缩水
-    const distanceBudget = hexDistance(station.tile, dest.tile) * DISTANCE_BUDGET_MINUTES_PER_HEX;
-    const budget = Math.round(
-      PASSENGER_BUDGET[kind] * this.rng.range(0.8, 1.4) + distanceBudget,
-    );
-    const expectedCost = walkMinutes + route.cost;
-    if (expectedCost > budget) {
-      flow.gaveUpToday += 1;
-      flow.gaveUpTotal += 1;
-      return null;
-    }
-
-    return {
+    this.waitingAt(homeKey).push({
       id: this.nextPassengerId++,
       state: 'WAITING',
       kind,
-      originKey,
-      originName: station.name,
-      destKey,
-      destName: dest.name,
+      originKey: homeKey,
+      originName: homeStation.name,
+      destKey: hexKey(chosen.station.q, chosen.station.r),
+      destName: chosen.station.name,
       budget,
       expectedCost,
-      walkMinutes,
+      walkMinutes: walkToStation,
       fare: 0,
-      route: route.legs,
+      route: chosen.route.legs,
       legIndex: 0,
       carIndex: -1,
       createdAtDay: this.day,
-    };
+    });
+  }
+
+  /** 从当前上车站出发，服务图可达的所有客运站；按目的地车站覆盖格数加权。 */
+  private destinationCandidates(
+    origin: Station,
+    cache: Map<string, DestinationCandidate[]>,
+  ): DestinationCandidate[] {
+    const originKey = hexKey(origin.q, origin.r);
+    const cached = cache.get(originKey);
+    if (cached) return cached;
+
+    const candidates: DestinationCandidate[] = [];
+    for (const station of this.network.stationList) {
+      if (station.type === 'freight' || station.id === origin.id) continue;
+      const key = hexKey(station.q, station.r);
+      const route = this.findPassengerRoute(originKey, key);
+      if (!route) continue;
+      candidates.push({
+        station,
+        route,
+        weight: 1 + station.coverage.length * 0.02,
+      });
+    }
+    cache.set(originKey, candidates);
+    return candidates;
+  }
+
+  /** 最近的可载客车站（不含货运站），且必须覆盖该地块。 */
+  private nearestPassengerStation(tile: Tile): Station | null {
+    let best: Station | null = null;
+    let bestDistance = Infinity;
+    for (const station of this.network.stationList) {
+      if (station.type === 'freight') continue;
+      if (!tile.servedBy.includes(station.id)) continue;
+      const distance = hexDistance(tile, station.tile);
+      if (
+        distance < bestDistance ||
+        (distance === bestDistance && best !== null && station.id < best.id)
+      ) {
+        best = station;
+        bestDistance = distance;
+      }
+    }
+    return best;
   }
 
   /** 网络变化后，为所有候车 / 换乘乘客重新做独立寻路。 */
@@ -1472,10 +1619,6 @@ export class RailOperations {
 
   private giveUpPassenger(passenger: Passenger): void {
     passenger.state = 'GAVE_UP';
-    const flow = this.flowForStop(passenger.originKey);
-    if (!flow) return;
-    flow.gaveUpToday += 1;
-    flow.gaveUpTotal += 1;
   }
 
 
@@ -1485,47 +1628,6 @@ export class RailOperations {
     const tile = this.world.get(q!, r!);
     const station = tile ? this.network.stationAt(tile) : null;
     return station ? this.flowFor(station) : null;
-  }
-
-  /** 基础客流 = 覆盖范围内非荒野地块数 / 4，向下取整；再乘平均因子。 */
-  private dailyDemandFor(station: { type: StationType; coverage: Tile[] }): number {
-    if (station.type === 'freight') return 0;
-    const usable = station.coverage.reduce(
-      (count, tile) => count + (isDemandTile(tile) ? 1 : 0),
-      0,
-    );
-    const base = Math.floor(usable / 4);
-    if (base <= 0) return 0;
-    const factor = this.regionFactorFor(station);
-    if (factor <= 0) return 0;
-    return Math.max(1, Math.round(base * factor));
-  }
-
-  /** 服务范围内非水域 / 荒地 / 山地地块的客流因子平均值。 */
-  private regionFactorFor(station: { type: StationType; coverage: Tile[] }): number {
-    if (station.type === 'freight') return 0;
-    const usable = station.coverage.filter((tile) => isDemandTile(tile));
-    if (usable.length === 0) return 0;
-    let total = 0;
-    for (const tile of usable) {
-      total += this.terrainDemandFactor(tile.terrain, station.type);
-    }
-    return total / usable.length;
-  }
-
-  private terrainDemandFactor(terrain: Terrain, stationType: StationType): number {
-    switch (terrain) {
-      case Terrain.Town:
-        return stationType === 'light' ? 3.5 : 2.5;
-      case Terrain.Industry:
-        return 2.0;
-      case Terrain.Suburb:
-        return 1.5;
-      case Terrain.Farmland:
-        return 1.0;
-      default:
-        return 0;
-    }
   }
 
   /** 到站下客：终点乘客结算票款，换乘乘客进入站内候车。 */
@@ -2019,7 +2121,7 @@ export class RailOperations {
     }
   }
 
-  /** 每个工业区每小时检查一次：5% 概率生成一张货单。 */
+  /** 每个工业区每小时 1% 概率生成一张货单；同一工业区的多个货站共享判定。 */
   private tryCreateCargoOrder(
     blobId: number,
     groups: Map<number, { name: string; stations: Station[] }>,
@@ -2482,11 +2584,15 @@ export class RailOperations {
     }
   }
 
-  /** 某货站当前等待接单的货单数。 */
+  /** 某货站尚未装车的货单数：包含等待接单、前往取货与装货中的订单。 */
   cargoWaitingAt(key: string): number {
     let count = 0;
     for (const order of this.cargoOrders.values()) {
-      if (order.truckId === null && order.originKey === key) count += 1;
+      if (order.originKey !== key) continue;
+      const truck = order.truckId === null ? null : this.truckMap.get(order.truckId);
+      // 已装车出发的订单不再占用货站图标
+      if (truck && truck.orderId === order.id && truck.loaded) continue;
+      count += 1;
     }
     return count;
   }
@@ -2723,7 +2829,15 @@ export class RailOperations {
 
     for (const saved of save.flows ?? []) {
       if (!saved || !saved.key) continue;
-      this.flowMap.set(saved.key, { ...saved });
+      this.flowMap.set(saved.key, {
+        key: saved.key,
+        boardedToday: Number.isFinite(saved.boardedToday) ? saved.boardedToday : 0,
+        boardedTotal: Number.isFinite(saved.boardedTotal) ? saved.boardedTotal : 0,
+        deliveredToday: Number.isFinite(saved.deliveredToday) ? saved.deliveredToday : 0,
+        deliveredTotal: Number.isFinite(saved.deliveredTotal) ? saved.deliveredTotal : 0,
+        transferredToday: Number.isFinite(saved.transferredToday) ? saved.transferredToday : 0,
+        transferredTotal: Number.isFinite(saved.transferredTotal) ? saved.transferredTotal : 0,
+      });
     }
 
     for (const entry of save.waiting ?? []) {
@@ -2754,7 +2868,6 @@ export class RailOperations {
       if (!entry || !Number.isFinite(entry.blobId) || !Number.isFinite(entry.minutes)) {
         continue;
       }
-      // 兼容旧存档的 6–8 天计时器：迁移为“下一次整点检查”
       this.cargoTimers.set(
         entry.blobId,
         Math.max(0, Math.min(CARGO_ORDER_CHECK_MINUTES, entry.minutes)),
@@ -2832,14 +2945,10 @@ export class RailOperations {
       type: station.type,
       waiting: waiting.length,
       transferring,
-      dailyDemand: flow.dailyDemand,
-      demandFactor: this.regionFactorFor(station),
       cargoWaiting: this.cargoWaitingAt(key),
-      generatedToday: flow.generatedToday,
       boardedToday: flow.boardedToday,
       deliveredToday: flow.deliveredToday,
-      gaveUpToday: flow.gaveUpToday,
-      generatedTotal: flow.generatedTotal,
+      boardedTotal: flow.boardedTotal,
       deliveredTotal: flow.deliveredTotal,
       coverage: station.coverage.length,
       demandTiles: station.demandTiles,
@@ -3004,6 +3113,9 @@ export class RailOperations {
       const station = tile ? this.network.stationAt(tile) : null;
       if (!tile || !station) {
         return { ok: false, message: `停靠站「${stop.name}」尚未建成` };
+      }
+      if (station.type === 'freight') {
+        return { ok: false, message: '货运站不能作为客运线路停靠站' };
       }
       const key = hexKey(tile.q, tile.r);
       if (seen.has(key)) return { ok: false, message: '同一车站不能重复作为停靠站' };

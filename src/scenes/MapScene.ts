@@ -802,9 +802,9 @@ export class MapScene extends Phaser.Scene {
         zoom,
       );
 
-      if (this.lineEditorActive) {
-        // 线路编辑时高亮所有可选车站
-        const ring = 24 / zoom;
+      if (this.lineEditorActive && station.type !== 'freight') {
+        // 线路编辑时高亮所有可选客运车站；圆圈跟随车站图标缩放
+        const ring = this.stationIconRadius(zoom) * 1.35;
         g.fillStyle(0xf2d49a, 0.06);
         g.fillCircle(station.tile.x, station.tile.y, ring);
         g.lineStyle(1.4 / zoom, 0xf2d49a, 0.8);

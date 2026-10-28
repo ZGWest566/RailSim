@@ -320,6 +320,10 @@ class RailSimApp {
       this.hud.toast('请点击已建成的车站。');
       return;
     }
+    if (station.type === 'freight') {
+      this.hud.toast('货运站不能加入客运线路。');
+      return;
+    }
     this.hud.addDraftStop({
       key: hexKey(tile.q, tile.r),
       name: station.name,

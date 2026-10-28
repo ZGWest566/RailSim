@@ -745,7 +745,7 @@ export function createHud(handlers: HudHandlers): Hud {
 
     const signature =
       tooltip.kind === 'station'
-        ? `s|${tooltip.station.key}|${tooltip.station.waiting}|${tooltip.station.transferring}|${tooltip.station.dailyDemand}|${tooltip.station.demandFactor}|${tooltip.station.cargoWaiting}|${tooltip.station.generatedToday}|${tooltip.station.boardedToday}|${tooltip.station.deliveredToday}|${tooltip.station.gaveUpToday}|${tooltip.station.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.station.destinations.map((item) => `${item.name}:${item.count}`).join(',')}|${tooltip.station.lines.map((line) => line.name).join(',')}`
+        ? `s|${tooltip.station.key}|${tooltip.station.waiting}|${tooltip.station.transferring}|${tooltip.station.cargoWaiting}|${tooltip.station.boardedToday}|${tooltip.station.deliveredToday}|${tooltip.station.coverage}|${tooltip.station.demandTiles}|${tooltip.station.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.station.destinations.map((item) => `${item.name}:${item.count}`).join(',')}|${tooltip.station.lines.map((line) => line.name).join(',')}`
         : tooltip.kind === 'truck'
           ? `k|${tooltip.truck.id}|${tooltip.truck.state}|${tooltip.truck.loaded}|${tooltip.truck.order?.originName ?? ''}|${tooltip.truck.order?.destName ?? ''}|${tooltip.truck.order?.amount ?? 0}|${tooltip.truck.order?.reward ?? 0}|${tooltip.truck.revenueToday}|${tooltip.truck.deliveriesToday}|${tooltip.truck.opexToday}|${tooltip.truck.opexTotal}`
           : `t|${tooltip.train.id}|${tooltip.train.lineName}|${tooltip.train.state}|${tooltip.train.speed}|${tooltip.train.onboard}|${tooltip.train.carLoads.join(',')}|${tooltip.train.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.train.nextStopName}|${tooltip.train.revenueToday}|${tooltip.train.deliveredToday}|${tooltip.train.opexToday}|${tooltip.train.opexTotal}|${tooltip.train.destinations.map((item) => `${item.name}:${item.count}`).join(',')}`;
@@ -788,9 +788,7 @@ export function createHud(handlers: HudHandlers): Hud {
           mapTooltip.append(tipRow('说明', '自动接单 · 沿轨道行驶'));
         } else {
           mapTooltip.append(
-            tipSub(
-              `日需求 ${station.dailyDemand} 人 · 客流因子 ×${station.demandFactor.toFixed(2)} · 覆盖 ${station.coverage} / ${station.demandTiles} 格`,
-            ),
+            tipSub(`覆盖 ${station.coverage} / ${station.demandTiles} 格`),
           );
           mapTooltip.append(tipRow('候车', `${station.waiting} 人${station.transferring > 0 ? `（换乘 ${station.transferring}）` : ''}`));
           const stationKinds = tipKindRow(station.kinds);
@@ -798,7 +796,7 @@ export function createHud(handlers: HudHandlers): Hud {
           mapTooltip.append(
             tipRow(
               '今日',
-              `生成 ${station.generatedToday} · 上车 ${station.boardedToday} · 送达 ${station.deliveredToday}`,
+              `上车 ${station.boardedToday} · 送达 ${station.deliveredToday}`,
             ),
           );
           if (station.destinations.length > 0) {
@@ -809,9 +807,6 @@ export function createHud(handlers: HudHandlers): Hud {
             mapTooltip.append(
               tipRow('去往', `${dest}${station.destinations.length > 3 ? ' …' : ''}`),
             );
-          }
-          if (station.gaveUpToday > 0) {
-            mapTooltip.append(tipRow('放弃', `${station.gaveUpToday} 人`));
           }
         }
 
