@@ -248,7 +248,7 @@ export function createHud(handlers: HudHandlers): Hud {
     meta.textContent =
       def.type === 'freight'
         ? `工业区 · ¥${Math.round(def.cost / 1000)}k · 自动货单`
-        : `半径 ${def.radius} · ¥${Math.round(def.cost / 1000)}k · ${def.dailyDemand} 人/日`;
+        : `半径 ${def.radius} · ¥${Math.round(def.cost / 1000)}k`;
 
     button.append(dot, name, meta);
     button.addEventListener('click', () => {

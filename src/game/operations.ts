@@ -3,7 +3,7 @@ import { Rng } from '../core/rng';
 import { HEX_SIZE, KM_PER_HEX } from '../config';
 import { isDemandTile, PASSENGER_OPEX_PER_HEX, CARGO_OPEX_PER_HEX } from './economy';
 import type { RailNetwork, Station } from './network';
-import { STATION_DEFS, type StationType } from './stations';
+import type { StationType } from './stations';
 import {
   CARGO_AMOUNT_MAX,
   CARGO_AMOUNT_MIN,
@@ -1254,7 +1254,7 @@ export class RailOperations {
 
     const days = minutes / MINUTES_PER_DAY;
     for (const station of this.network.stationList) {
-      if (STATION_DEFS[station.type].dailyDemand <= 0) continue;
+      if (station.type === 'freight') continue;
       const flow = this.flowFor(station);
       const key = hexKey(station.q, station.r);
       if (flow.dailyDemand <= 0) continue;
@@ -1487,23 +1487,30 @@ export class RailOperations {
     return station ? this.flowFor(station) : null;
   }
 
-  /** 日均乘客：车站基础量 × 服务范围内地块客流因子的平均值。 */
+  /** 基础客流 = 覆盖范围内非荒野地块数 / 4，向下取整；再乘平均因子。 */
   private dailyDemandFor(station: { type: StationType; coverage: Tile[] }): number {
-    const base = STATION_DEFS[station.type].dailyDemand;
+    if (station.type === 'freight') return 0;
+    const usable = station.coverage.reduce(
+      (count, tile) => count + (isDemandTile(tile) ? 1 : 0),
+      0,
+    );
+    const base = Math.floor(usable / 4);
     if (base <= 0) return 0;
     const factor = this.regionFactorFor(station);
     if (factor <= 0) return 0;
     return Math.max(1, Math.round(base * factor));
   }
 
-  /** 服务范围内所有地块因子的算术平均；城镇地块的因子取决于车站类型。 */
+  /** 服务范围内非水域 / 荒地 / 山地地块的客流因子平均值。 */
   private regionFactorFor(station: { type: StationType; coverage: Tile[] }): number {
-    if (station.type === 'freight' || station.coverage.length === 0) return 0;
+    if (station.type === 'freight') return 0;
+    const usable = station.coverage.filter((tile) => isDemandTile(tile));
+    if (usable.length === 0) return 0;
     let total = 0;
-    for (const tile of station.coverage) {
+    for (const tile of usable) {
       total += this.terrainDemandFactor(tile.terrain, station.type);
     }
-    return total / station.coverage.length;
+    return total / usable.length;
   }
 
   private terrainDemandFactor(terrain: Terrain, stationType: StationType): number {

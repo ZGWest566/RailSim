@@ -255,7 +255,7 @@ export class MapScene extends Phaser.Scene {
     const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
     const tile = this.tileAtScreen(pointer.x, pointer.y);
     const station = tile ? this.network.stationAt(tile) : null;
-    const iconRadius = clamp(20 / zoom, 12, 30);
+    const iconRadius = this.stationIconRadius(zoom);
     const nearStation =
       station && tile ? Math.hypot(worldPoint.x - tile.x, worldPoint.y - tile.y) < iconRadius : false;
     const truck = this.truckAtPointer(worldPoint);
@@ -822,7 +822,7 @@ export class MapScene extends Phaser.Scene {
     if (!this.network || !this.operations) return;
 
     const zoom = Math.max(this.cameras.main.zoom, 0.1);
-    const iconRadius = clamp(20 / zoom, 12, 30);
+    const iconRadius = this.stationIconRadius(zoom);
     const dotRadius = clamp(2.2 / zoom, 1.2, 4);
     const spacing = dotRadius * 3.1;
     const active = new Set<string>();
@@ -980,7 +980,7 @@ export class MapScene extends Phaser.Scene {
     kind: 'passenger' | 'cargo',
   ): void {
     const zoom = Math.max(this.cameras.main.zoom, 0.1);
-    const iconRadius = clamp(20 / zoom, 12, 30);
+    const iconRadius = this.stationIconRadius(zoom);
     const jitterX = Phaser.Math.FloatBetween(-12, 12) / zoom;
     const jitterY = Phaser.Math.FloatBetween(-4, 4) / zoom;
     const secondLine =
@@ -1037,6 +1037,10 @@ export class MapScene extends Phaser.Scene {
     this.incomeFloats.clear();
   }
 
+  private stationIconRadius(zoom: number): number {
+    return clamp(20 / zoom, 12, 30);
+  }
+
   private drawStationIcon(
     g: Phaser.GameObjects.Graphics,
     x: number,
@@ -1048,7 +1052,7 @@ export class MapScene extends Phaser.Scene {
     ghost = false,
   ): void {
     const screen = (px: number) => px / zoom;
-    const radius = clamp(20 / zoom, 12, 30);
+    const radius = this.stationIconRadius(zoom);
 
     g.fillStyle(0x060b0e, ghost ? 0.25 : 0.45);
     g.fillCircle(x, y, radius);
@@ -1126,17 +1130,21 @@ export class MapScene extends Phaser.Scene {
       }
     }
 
-    // 停靠站外圈
+    // 停靠站外圈：跟随车站图标的屏幕尺寸，避免缩小时过大、放大时被图标盖住
+    const iconRadius = this.stationIconRadius(zoom);
+    const ringRadius = iconRadius * 1.3;
+    const outerRadius = ringRadius + screen(3);
+
     for (const stop of line.stops) {
       const tile = this.world.get(stop.q, stop.r);
       if (!tile) continue;
       const ringColor = line.status === 'OK' ? line.color : 0xe07a6a;
-      g.fillStyle(0x0a1117, 0.35);
-      g.fillCircle(tile.x, tile.y, screen(25));
-      g.lineStyle(screen(2), ringColor, 0.95);
-      g.strokeCircle(tile.x, tile.y, screen(25));
-      g.lineStyle(screen(1), ringColor, 0.35);
-      g.strokeCircle(tile.x, tile.y, screen(29));
+      g.fillStyle(0x0a1117, 0.12);
+      g.fillCircle(tile.x, tile.y, ringRadius);
+      g.lineStyle(screen(2.2), ringColor, 0.95);
+      g.strokeCircle(tile.x, tile.y, ringRadius);
+      g.lineStyle(screen(1), ringColor, 0.3);
+      g.strokeCircle(tile.x, tile.y, outerRadius);
     }
   }
 
