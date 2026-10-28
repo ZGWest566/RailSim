@@ -10,7 +10,7 @@ export interface StationDef {
   radius: number;
   /** 固定建造费（轨道费用另计） */
   cost: number;
-  /** 日均客流基础值，实际按城区覆盖占比折算。货运站为 0（货运系统待接入）。 */
+  /** 日均客流基础值，实际按城区覆盖占比折算；货运站为 0。 */
   dailyDemand: number;
   color: number;
   colorCss: string;
@@ -24,7 +24,7 @@ export const STATION_DEFS: Record<StationType, StationDef> = {
     short: '轻',
     radius: 1,
     cost: 15_000,
-    dailyDemand: 6,
+    dailyDemand: 12,
     color: 0x6cc4d5,
     colorCss: '#6cc4d5',
     description: '半径 1 格，适合城镇短途。',
@@ -35,7 +35,7 @@ export const STATION_DEFS: Record<StationType, StationDef> = {
     short: '小',
     radius: 2,
     cost: 35_000,
-    dailyDemand: 10,
+    dailyDemand: 20,
     color: 0xe9b968,
     colorCss: '#e9b968',
     description: '半径 2 格，连接郊区与城镇。',
@@ -46,7 +46,7 @@ export const STATION_DEFS: Record<StationType, StationDef> = {
     short: '大',
     radius: 3,
     cost: 70_000,
-    dailyDemand: 20,
+    dailyDemand: 40,
     color: 0xe8955f,
     colorCss: '#e8955f',
     description: '半径 3 格，适合作为枢纽。',

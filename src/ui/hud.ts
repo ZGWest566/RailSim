@@ -185,6 +185,9 @@ export function createHud(handlers: HudHandlers): Hud {
   let lineDraft: DraftLine | null = null;
   let revenueToday = 0;
   let opexToday = 0;
+  /** 当前模拟速度与暂停前的速度，供空格键恢复。 */
+  let currentSpeed = 1;
+  let resumeSpeed = 1;
   let tooltipSignature = '';
   let stopDragIndex: number | null = null;
   let garageOpen = false;
@@ -344,11 +347,18 @@ export function createHud(handlers: HudHandlers): Hud {
     });
   }
 
+  function applySpeed(speed: number): void {
+    currentSpeed = speed;
+    if (speed > 0) resumeSpeed = speed;
+    for (const button of speedButtons) {
+      button.classList.toggle('is-active', Number(button.dataset.speed ?? 0) === speed);
+    }
+    handlers.setSpeed(speed);
+  }
+
   for (const button of speedButtons) {
     button.addEventListener('click', () => {
-      for (const other of speedButtons) other.classList.remove('is-active');
-      button.classList.add('is-active');
-      handlers.setSpeed(Number(button.dataset.speed ?? 1));
+      applySpeed(Number(button.dataset.speed ?? 1));
     });
   }
 
@@ -400,6 +410,12 @@ export function createHud(handlers: HudHandlers): Hud {
     }
 
     if (confirmOpen) return;
+
+    if (event.code === 'Space' || key === ' ') {
+      applySpeed(currentSpeed === 0 ? resumeSpeed : 0);
+      event.preventDefault();
+      return;
+    }
 
     if (key >= '1' && key <= '5') {
       const tool = (['inspect', 'track', 'station', 'demolish', 'segment'] as BuildTool[])[
