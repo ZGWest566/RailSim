@@ -828,11 +828,26 @@ export class MapScene extends Phaser.Scene {
     const active = new Set<string>();
 
     for (const station of this.network.stationList) {
+      const key = hexKey(station.q, station.r);
+
+      if (station.type === 'freight') {
+        const orders = this.operations.cargoWaitingAt(key);
+        if (orders > 0) {
+          this.drawStationCargoOrders(
+            g,
+            station.tile.x,
+            station.tile.y,
+            orders,
+            zoom,
+            iconRadius,
+          );
+        }
+      }
+
       const passengers = this.operations.stationWaitingPassengers(station.tile);
       const count = passengers.length;
       if (count <= 0) continue;
 
-      const key = hexKey(station.q, station.r);
       active.add(key);
       const shown = Math.min(count, 5);
       const totalWidth = (shown - 1) * spacing;
@@ -864,6 +879,40 @@ export class MapScene extends Phaser.Scene {
 
     for (const [key, label] of this.stationCountLabels) {
       if (!active.has(key)) label.setVisible(false);
+    }
+  }
+
+  /**
+   * 货站上方的待运货单：暖色货箱，与货车载货箱同尺寸 / 颜色，垂直堆叠，最多 3 个。
+   */
+  private drawStationCargoOrders(
+    g: Phaser.GameObjects.Graphics,
+    x: number,
+    y: number,
+    count: number,
+    zoom: number,
+    iconRadius: number,
+  ): void {
+    const truckLength = clamp(26 / zoom, 12, 42);
+    const truckWidth = clamp(14 / zoom, 7, 24);
+    const boxWidth = truckLength * 0.5;
+    const boxHeight = truckWidth * 0.46;
+    const gap = Math.max(1.2 / zoom, boxHeight * 0.32);
+    const shown = Math.min(Math.max(0, count), 3);
+    const bottomY =
+      y - iconRadius - Math.max(3 / zoom, boxHeight * 0.6) - boxHeight / 2;
+
+    for (let i = 0; i < shown; i++) {
+      const cy = bottomY - i * (boxHeight + gap);
+      const left = x - boxWidth / 2;
+      const top = cy - boxHeight / 2;
+
+      g.fillStyle(0xc98e4a, 0.98);
+      g.fillRect(left, top, boxWidth, boxHeight);
+      g.lineStyle(1 / zoom, 0x6e4a24, 0.95);
+      g.strokeRect(left, top, boxWidth, boxHeight);
+      g.lineStyle(1.2 / zoom, 0xffd8a0, 0.7);
+      g.lineBetween(x, cy - boxHeight * 0.38, x, cy + boxHeight * 0.38);
     }
   }
 
@@ -1151,6 +1200,18 @@ export class MapScene extends Phaser.Scene {
     const { spacing } = metrics;
     const tail = (train.cars - 1) * spacing;
 
+    // 改线回送：沿回送路径排布车厢；路径已包含车头后方的旧线路
+    if (train.reposition) {
+      const headDistance = train.reposition.distance;
+      const result: { x: number; y: number; angle: number; head: boolean }[] = [];
+      for (let i = 0; i < train.cars; i++) {
+        const distance = headDistance - i * spacing;
+        const sample = this.sampleTrainPath(train.reposition, distance);
+        if (sample) result.push({ x: sample.x, y: sample.y, angle: sample.angle, head: i === 0 });
+      }
+      return result;
+    }
+
     // 非环线两端：把车头向内收，保证整列方块都在线路上，而不是挤成一格
     let headDistance = train.distance;
     if (!line.isLoop && line.length > tail) {
@@ -1170,6 +1231,31 @@ export class MapScene extends Phaser.Scene {
     return result;
   }
 
+  private sampleTrainPath(
+    path: NonNullable<Train['reposition']>,
+    distance: number,
+  ): { x: number; y: number; angle: number } | null {
+    if (path.points.length < 2 || path.length <= 0) return null;
+    const d = clamp(distance, 0, path.length);
+    let index = 0;
+    while (index < path.points.length - 2 && (path.cumulative[index + 1] ?? 0) < d) {
+      index++;
+    }
+
+    const start = path.points[index]!;
+    const end = path.points[index + 1]!;
+    const segStart = path.cumulative[index] ?? 0;
+    const segEnd = path.cumulative[index + 1] ?? path.length;
+    const t = (d - segStart) / Math.max(0.0001, segEnd - segStart);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    return {
+      x: start.x + dx * t,
+      y: start.y + dy * t,
+      angle: Math.atan2(dy, dx),
+    };
+  }
+
   private drawTrain(
     g: Phaser.GameObjects.Graphics,
     train: Train,
@@ -1178,6 +1264,7 @@ export class MapScene extends Phaser.Scene {
   ): void {
     const metrics = this.trainCarMetrics(zoom);
     const samples = this.trainCarSamples(train, line, metrics);
+    const dir = train.reposition ? 1 : train.dir;
 
     for (let index = 0; index < samples.length; index++) {
       const car = samples[index]!;
@@ -1191,7 +1278,7 @@ export class MapScene extends Phaser.Scene {
         metrics.width,
         line.color,
         car.head,
-        train.dir,
+        dir,
         zoom,
         passengers,
       );

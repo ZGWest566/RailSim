@@ -8,8 +8,8 @@ import {
   CARGO_AMOUNT_MAX,
   CARGO_AMOUNT_MIN,
   CARGO_MAX_ORDERS,
-  CARGO_ORDER_MAX_MINUTES,
-  CARGO_ORDER_MIN_MINUTES,
+  CARGO_ORDER_CHANCE_PER_HOUR,
+  CARGO_ORDER_CHECK_MINUTES,
   CARGO_REWARD_MAX,
   CARGO_REWARD_MIN,
   TRUCK_COST,
@@ -130,7 +130,7 @@ export interface Passenger {
   originName: string;
   destKey: string;
   destName: string;
-  /** 可接受的最大出行成本（游戏分钟，含步行 / 候车 / 乘车 / 换乘） */
+  /** 可接受的最大出行成本（游戏分钟）：基础预算 + 按直线距离折算的路程预算。 */
   budget: number;
   /** 生成时的预计总成本 */
   expectedCost: number;
@@ -146,6 +146,28 @@ export interface Passenger {
   createdAtDay: number;
 }
 
+export interface TrainPathPoint {
+  x: number;
+  y: number;
+}
+
+/** 线路改线后的回送路径：先到旧图下一站，再沿轨道返回新图首站。 */
+export interface TrainReposition {
+  points: TrainPathPoint[];
+  cumulative: number[];
+  length: number;
+  /** 已沿回送路径行驶的距离 */
+  distance: number;
+  /** 旧图上的下一站，经过时只下客 */
+  nextStopKey: string | null;
+  /** 下一站在回送路径上的距离 */
+  nextStopDistance: number;
+  passedNextStop: boolean;
+  /** 下一站停站剩余时间（秒） */
+  waitRemaining: number;
+  targetStopKey: string;
+}
+
 export interface Train {
   id: number;
   modelId: string;
@@ -158,6 +180,8 @@ export interface Train {
   speed: number;
   /** 停站剩余时间（秒）；大于 0 时列车不动。 */
   dwellRemaining: number;
+  /** 改线回送中；完成后接回新线路首站 */
+  reposition?: TrainReposition;
   onboard: Passenger[];
   revenueToday: number;
   revenueTotal: number;
@@ -376,15 +400,28 @@ const PASSENGER_BUDGET: Record<PassengerKind, number> = {
   tourist: 220,
   worker: 180,
 };
+/**
+ * 按直线距离补充的路程预算。
+ * 先按最慢列车的速度换算每格用时，再留出绕行余量：
+ * 这样即使线路绕路或需要换乘，偏远车站也能产生乘客。
+ */
+const BUDGET_REFERENCE_SPEED = 36;
+const DISTANCE_BUDGET_DETOUR = 1.5;
+const DISTANCE_BUDGET_MINUTES_PER_HEX =
+  ((SQRT3 * HEX_SIZE) / BUDGET_REFERENCE_SPEED) * MINUTES_PER_SECOND * DISTANCE_BUDGET_DETOUR;
 
 /* ------------------------------ 经济带系数 ------------------------------ */
 
-/** 站点覆盖范围的典型经济带基准值：平均 0.42 对应系数 1.0。 */
-const ECON_BASELINE = 0.42;
-/** 经济带敏感度：值越大，繁荣区与荒野区的系数差越大。 */
-const ECON_SENSITIVITY = 4.5;
-const ECON_FACTOR_MIN = 0.15;
-const ECON_FACTOR_MAX = 2.4;
+/**
+ * 经济带系数：
+ * - econ < 0.35：0（完全没有客流）
+ * - econ 0.35 → 0.50：线性 0 → 2.0
+ * - 继续按同一斜率增长，最高 2.5（econ 约 0.5375 后封顶）
+ */
+const ECON_ZERO_BELOW = 0.35;
+const ECON_MID = 0.5;
+const ECON_FACTOR_AT_MID = 2.0;
+const ECON_FACTOR_MAX = 2.5;
 
 export interface StationFlow {
   key: string;
@@ -517,19 +554,53 @@ export class RailOperations {
     const prepared = this.prepareLine(input);
     if (!prepared.ok) return { ok: false, message: prepared.message };
 
+    const newFirst = prepared.stops[0];
+    if (!newFirst) return { ok: false, message: '线路至少需要 2 个停靠站' };
+
+    const stopsChanged =
+      line.isLoop !== prepared.isLoop ||
+      line.stops.length !== prepared.stops.length ||
+      line.stops.some((stop, index) => stop.key !== prepared.stops[index]?.key);
+
+    // 改线前先为每列车规划回送路径：旧图下一站 → 新图首站
+    const transitions = new Map<number, TrainReposition | null>();
+    if (stopsChanged) {
+      for (const trainId of line.trainIds) {
+        const train = this.trainMap.get(trainId);
+        if (!train) continue;
+        transitions.set(trainId, this.buildReposition(line, train, newFirst));
+      }
+    }
+
     line.name = prepared.name;
     line.color = prepared.color;
     line.colorCss = prepared.colorCss;
     line.isLoop = prepared.isLoop;
     line.stops = prepared.stops;
     this.applyRoute(line, prepared.route, prepared.stopDistances);
-    this.clampTrainDistances(line);
-    for (const trainId of line.trainIds) {
-      const train = this.trainMap.get(trainId);
-      if (!train) continue;
-      train.dwellRemaining = Math.min(train.dwellRemaining, DWELL_SECONDS);
-      // 线路调整后，原目的地可能已不在线路上：乘客回到出发站重新候车
-      this.returnOnboard(train);
+
+    if (stopsChanged) {
+      for (const trainId of line.trainIds) {
+        const train = this.trainMap.get(trainId);
+        if (!train) continue;
+        const reposition = transitions.get(trainId) ?? null;
+        train.dwellRemaining = 0;
+        train.dir = 1;
+        train.distance = 0;
+        // 无缝衔接：有回送路径时保留当前速度，避免保存瞬间急停
+        if (!reposition) train.speed = 0;
+        train.reposition = reposition ?? undefined;
+
+        // 找不到轨道回送路径时，直接在首站接回；乘客仍然保留
+        if (!reposition) {
+          this.alightDestinationsAt(train, newFirst.key);
+          this.rebaseOnboard(train, newFirst.key);
+          train.dwellRemaining = DWELL_SECONDS;
+        }
+      }
+    } else {
+      // 只改名称 / 颜色或原样保存：保持列车当前运行状态
+      this.clampTrainDistances(line);
     }
     this.recomputeWaitingRoutes();
 
@@ -546,6 +617,7 @@ export class RailOperations {
       const train = this.trainMap.get(trainId);
       if (!train) continue;
       this.returnOnboard(train);
+      train.reposition = undefined;
       train.lineId = null;
       train.distance = 0;
       train.dir = 1;
@@ -689,6 +761,7 @@ export class RailOperations {
     const existing = line.trainIds.length;
     line.trainIds.push(train.id);
     train.lineId = line.id;
+    train.reposition = undefined;
     train.dir = 1;
     train.speed = 0;
     train.dwellRemaining = existing > 0 ? 0.6 : 1.2;
@@ -709,6 +782,7 @@ export class RailOperations {
     const line = this.lineMap.get(train.lineId);
     if (line) line.trainIds = line.trainIds.filter((id) => id !== train.id);
     this.returnOnboard(train);
+    train.reposition = undefined;
     train.lineId = null;
     train.distance = 0;
     train.dir = 1;
@@ -735,6 +809,12 @@ export class RailOperations {
         if (!train) continue;
         const model = trainModel(train.modelId);
         if (!model) continue;
+
+        // 改线回送：先到旧图下一站，再前往新图首站，不上下客（只下目的地乘客）
+        if (train.reposition) {
+          this.advanceReposition(train, model, dt);
+          continue;
+        }
 
         // 停站读秒：速度归零，结束后再起步并上客
         if (train.dwellRemaining > 0) {
@@ -829,6 +909,341 @@ export class RailOperations {
       train.distance = Math.max(0, Math.min(line.length, rawDistance));
     }
     this.alightAtStop(line, train, stopIndex);
+  }
+
+  /* ------------------------------ 改线回送 ------------------------------ */
+
+  /**
+   * 生成改线回送路径：
+   * 1. 沿旧线路运行到下一站（或当前停靠站）；
+   * 2. 从该站沿现有轨道前往新运行图的首站；
+   * 3. 到达后接回新线路，乘客全程留在车上。
+   */
+  private buildReposition(
+    line: Line,
+    train: Train,
+    newFirst: LineStop,
+  ): TrainReposition | null {
+    const target = this.world.get(newFirst.q, newFirst.r);
+    if (!target) return null;
+
+    // 已经在回送途中又改了一次线：直接从当前位置重新回送
+    if (train.reposition) {
+      const current = this.samplePath(train.reposition, train.reposition.distance);
+      if (!current) return null;
+      return this.buildDirectReposition(train, current, target, newFirst.key);
+    }
+
+    let nextIndex: number | null = null;
+    if (train.dwellRemaining > 0) {
+      const currentStop = this.currentStopIndex(line, train);
+      if (currentStop >= 0) nextIndex = currentStop;
+    }
+    if (nextIndex === null) {
+      const next = this.nextStopAhead(line, train);
+      if (next) nextIndex = next.index;
+    }
+    if (nextIndex === null) {
+      // 端点没有“下一站”，取最近的停靠站
+      let bestIndex = -1;
+      let bestDelta = Infinity;
+      for (let i = 0; i < line.stopDistances.length; i++) {
+        const delta = Math.abs(line.stopDistances[i]! - train.distance);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          bestIndex = i;
+        }
+      }
+      if (bestIndex < 0) return null;
+      nextIndex = bestIndex;
+    }
+
+    const nextStop = line.stops[nextIndex];
+    if (!nextStop) return null;
+    const nextDistance = line.stopDistances[nextIndex] ?? train.distance;
+    const fromTile = this.world.get(nextStop.q, nextStop.r);
+    if (!fromTile) return null;
+
+    const leg1 = this.buildLineLeg(line, train.distance, nextDistance);
+    const tiles = this.network.findPath(fromTile, target);
+    if (!tiles) return null;
+    const leg2 = tiles.map((tile) => ({ x: tile.x, y: tile.y }));
+
+    // 把车头后方的旧线路也接进回送路径，保证改线瞬间车厢不向前挤成一团
+    const tailBudget = Math.max(0, (train.cars - 1) * 80);
+    const tail =
+      tailBudget > 0.5
+        ? this.buildLineLeg(line, train.distance - train.dir * tailBudget, train.distance)
+        : [];
+
+    const points: TrainPathPoint[] = [];
+    const pushPoint = (point: TrainPathPoint): void => {
+      const last = points[points.length - 1];
+      if (!last || Math.hypot(last.x - point.x, last.y - point.y) > 0.5) {
+        points.push({ x: point.x, y: point.y });
+      }
+    };
+    for (const point of tail) pushPoint(point);
+    const headOffset = this.pathLength(points);
+    for (const point of leg1) pushPoint(point);
+    const nextStopDistance = this.pathLength(points);
+    for (const point of leg2) pushPoint(point);
+    if (points.length < 2) return null;
+
+    return {
+      points,
+      cumulative: this.pathCumulative(points),
+      length: this.pathLength(points),
+      distance: headOffset,
+      nextStopKey: nextStop.key,
+      nextStopDistance,
+      passedNextStop: false,
+      waitRemaining: 0,
+      targetStopKey: newFirst.key,
+    };
+  }
+
+  /** 回送途中再次改线：从当前位置直接寻路到新首站。 */
+  private buildDirectReposition(
+    train: Train,
+    current: TrainSample,
+    target: Tile,
+    targetStopKey: string,
+  ): TrainReposition | null {
+    const start = this.nearestTrackTile(current);
+    if (!start) return null;
+    const tiles = this.network.findPath(start, target);
+    if (!tiles) return null;
+
+    const tailBudget = Math.max(0, (train.cars - 1) * 80);
+    const old = train.reposition;
+    const tail =
+      old && tailBudget > 0.5
+        ? this.buildPathLeg(old, old.distance - tailBudget, old.distance)
+        : [];
+
+    const points: TrainPathPoint[] = [];
+    const pushPoint = (point: TrainPathPoint): void => {
+      const last = points[points.length - 1];
+      if (!last || Math.hypot(last.x - point.x, last.y - point.y) > 0.5) {
+        points.push({ x: point.x, y: point.y });
+      }
+    };
+    for (const point of tail) pushPoint(point);
+    pushPoint({ x: current.x, y: current.y });
+    const headOffset = this.pathLength(points);
+
+    for (const tile of tiles) {
+      pushPoint({ x: tile.x, y: tile.y });
+    }
+    if (points.length < 2) return null;
+
+    return {
+      points,
+      cumulative: this.pathCumulative(points),
+      length: this.pathLength(points),
+      distance: headOffset,
+      nextStopKey: null,
+      nextStopDistance: 0,
+      passedNextStop: true,
+      waitRemaining: 0,
+      targetStopKey,
+    };
+  }
+
+  /** 沿已有回送路径采样一段，用于二次改线时保留车尾。 */
+  private buildPathLeg(
+    path: NonNullable<Train['reposition']>,
+    from: number,
+    to: number,
+  ): TrainPathPoint[] {
+    const span = Math.abs(to - from);
+    const steps = Math.max(1, Math.min(600, Math.ceil(span / 12)));
+    const points: TrainPathPoint[] = [];
+    for (let i = 0; i <= steps; i++) {
+      const distance = from + (to - from) * (i / steps);
+      const sample = this.samplePath(path, distance);
+      if (sample) points.push({ x: sample.x, y: sample.y });
+    }
+    return points;
+  }
+
+  /** 沿旧线路折线采样一段，用于回送路径的前半段。 */
+  private buildLineLeg(line: Line, from: number, to: number): TrainPathPoint[] {
+    const span = Math.abs(to - from);
+    const steps = Math.max(1, Math.min(600, Math.ceil(span / 12)));
+    const points: TrainPathPoint[] = [];
+    for (let i = 0; i <= steps; i++) {
+      const distance = from + (to - from) * (i / steps);
+      const sample = this.sampleLine(line, distance);
+      if (sample) points.push({ x: sample.x, y: sample.y });
+    }
+    return points;
+  }
+
+  private nearestTrackTile(point: { x: number; y: number }): Tile | null {
+    let best: Tile | null = null;
+    let bestDistance = Infinity;
+    for (const track of this.network.trackList) {
+      const distance = Math.hypot(track.tile.x - point.x, track.tile.y - point.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = track.tile;
+      }
+    }
+    return best;
+  }
+
+  private pathLength(points: TrainPathPoint[]): number {
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += Math.hypot(
+        points[i]!.x - points[i - 1]!.x,
+        points[i]!.y - points[i - 1]!.y,
+      );
+    }
+    return total;
+  }
+
+  private pathCumulative(points: TrainPathPoint[]): number[] {
+    const cumulative = [0];
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += Math.hypot(
+        points[i]!.x - points[i - 1]!.x,
+        points[i]!.y - points[i - 1]!.y,
+      );
+      cumulative.push(total);
+    }
+    return cumulative;
+  }
+
+  private samplePath(
+    path: { points: TrainPathPoint[]; cumulative: number[]; length: number },
+    distance: number,
+  ): TrainSample | null {
+    if (path.points.length < 2 || path.length <= 0) return null;
+    const d = Math.max(0, Math.min(path.length, distance));
+    let index = 0;
+    while (index < path.points.length - 2 && (path.cumulative[index + 1] ?? 0) < d) {
+      index++;
+    }
+    const start = path.points[index]!;
+    const end = path.points[index + 1]!;
+    const segStart = path.cumulative[index] ?? 0;
+    const segEnd = path.cumulative[index + 1] ?? path.length;
+    const t = (d - segStart) / Math.max(0.0001, segEnd - segStart);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    return {
+      x: start.x + dx * t,
+      y: start.y + dy * t,
+      angle: Math.atan2(dy, dx),
+    };
+  }
+
+  /** 推进回送列车；到下一站短暂停靠，到新首站后恢复正常运行。 */
+  private advanceReposition(train: Train, model: TrainModel, dt: number): void {
+    const reposition = train.reposition;
+    if (!reposition) return;
+
+    if (reposition.waitRemaining > 0) {
+      reposition.waitRemaining = Math.max(0, reposition.waitRemaining - dt);
+      train.speed = 0;
+      return;
+    }
+
+    const limit = reposition.passedNextStop ? reposition.length : reposition.nextStopDistance;
+    const gap = limit - reposition.distance;
+    if (gap <= STOP_EPSILON) {
+      if (!reposition.passedNextStop) {
+        reposition.passedNextStop = true;
+        train.speed = 0;
+        if (reposition.nextStopKey) this.alightDestinationsAt(train, reposition.nextStopKey);
+        reposition.waitRemaining = DWELL_SECONDS;
+        return;
+      }
+      this.finishReposition(train);
+      return;
+    }
+
+    const brakeLimit = Math.sqrt(2 * TRAIN_BRAKE * gap);
+    const desired = Math.min(model.speed, brakeLimit);
+    if (train.speed < desired) {
+      train.speed = Math.min(desired, train.speed + TRAIN_ACCEL * dt);
+    } else {
+      train.speed = Math.max(desired, train.speed - TRAIN_BRAKE * dt);
+    }
+
+    const step = Math.min(train.speed * dt, gap);
+    if (step > 0) {
+      const cost = this.chargeOperatingCost(step, PASSENGER_OPEX_PER_HEX);
+      train.opexToday += cost;
+      train.opexTotal += cost;
+    }
+    reposition.distance += step;
+  }
+
+  private finishReposition(train: Train): void {
+    train.reposition = undefined;
+    train.distance = 0;
+    train.dir = 1;
+    train.speed = 0;
+
+    const line = train.lineId === null ? null : this.lineMap.get(train.lineId);
+    const first = line?.stops[0];
+    train.dwellRemaining = DWELL_SECONDS;
+    if (!first) return;
+
+    this.alightDestinationsAt(train, first.key);
+    this.rebaseOnboard(train, first.key);
+  }
+
+  /** 回送途中只下客，不办理上客 / 换乘。 */
+  private alightDestinationsAt(train: Train, stationKey: string): void {
+    if (train.onboard.length === 0) return;
+    const remaining: Passenger[] = [];
+    for (const passenger of train.onboard) {
+      if (passenger.destKey === stationKey) {
+        this.arrivePassenger(train, passenger, stationKey);
+      } else {
+        remaining.push(passenger);
+      }
+    }
+    train.onboard = remaining;
+  }
+
+  /** 接回新线路时重算车上乘客的剩余路线；无法继续的乘客留在首站候车。 */
+  private rebaseOnboard(train: Train, stationKey: string): void {
+    if (train.onboard.length === 0) return;
+    const remaining: Passenger[] = [];
+    for (const passenger of train.onboard) {
+      const route = this.findPassengerRoute(stationKey, passenger.destKey);
+      if (!route) {
+        passenger.state = 'WAITING';
+        passenger.route = [];
+        passenger.legIndex = 0;
+        passenger.carIndex = -1;
+        this.waitingAt(stationKey).push(passenger);
+        continue;
+      }
+
+      passenger.route = route.legs;
+      passenger.legIndex = 0;
+      const first = route.legs[0];
+      if (first && first.lineId === train.lineId) {
+        passenger.state = 'ON_TRAIN';
+        if (passenger.carIndex < 0 || passenger.carIndex >= train.cars) {
+          passenger.carIndex = 0;
+        }
+        remaining.push(passenger);
+      } else {
+        passenger.state = 'TRANSFERRING';
+        passenger.carIndex = -1;
+        this.waitingAt(stationKey).push(passenger);
+      }
+    }
+    train.onboard = remaining;
   }
 
   /* ------------------------------ 客流 ------------------------------ */
@@ -986,7 +1401,11 @@ export class RailOperations {
     const home = homes.length > 0 ? homes[this.rng.int(homes.length)]! : station.tile;
     const walkMinutes = hexDistance(home, station.tile) * WALK_MINUTES_PER_HEX;
     const kind = passengerKindFor(home.terrain);
-    const budget = Math.round(PASSENGER_BUDGET[kind] * this.rng.range(0.8, 1.4));
+    // 基础预算保留个人差异；路程预算按起终点直线距离补充，不随随机系数缩水
+    const distanceBudget = hexDistance(station.tile, dest.tile) * DISTANCE_BUDGET_MINUTES_PER_HEX;
+    const budget = Math.round(
+      PASSENGER_BUDGET[kind] * this.rng.range(0.8, 1.4) + distanceBudget,
+    );
     const expectedCost = walkMinutes + route.cost;
     if (expectedCost > budget) {
       flow.gaveUpToday += 1;
@@ -1068,23 +1487,21 @@ export class RailOperations {
     return station ? this.flowFor(station) : null;
   }
 
-  /** 日均乘客：车型基础量 × 区域平均经济带系数；繁荣区与荒野区差距被显著拉大。 */
+  /** 日均乘客：车站基础量 × 区域平均经济带系数；低经济区直接为 0。 */
   private dailyDemandFor(station: { type: StationType; coverage: Tile[] }): number {
     const base = STATION_DEFS[station.type].dailyDemand;
     if (base <= 0) return 0;
-    return Math.max(1, Math.round(base * this.econFactorFor(station)));
+    const factor = this.econFactorFor(station);
+    if (factor <= 0) return 0;
+    return Math.max(1, Math.round(base * factor));
   }
 
-  /** 区域平均经济带换算出的客流系数。 */
+  /** 区域平均经济带换算出的客流系数；0.35 以下为 0，0.50 时为 2.0，上限 2.5。 */
   private econFactorFor(station: { coverage: Tile[] }): number {
-    const demandTiles = station.coverage.filter((tile) => isDemandTile(tile));
-    const sample = demandTiles.length > 0 ? demandTiles : station.coverage;
-    if (sample.length === 0) return 0.3;
-    const avgEcon = sample.reduce((sum, tile) => sum + tile.econ, 0) / sample.length;
-    return Math.min(
-      ECON_FACTOR_MAX,
-      Math.max(ECON_FACTOR_MIN, 1 + (avgEcon - ECON_BASELINE) * ECON_SENSITIVITY),
-    );
+    const avgEcon = this.averageEconFor(station);
+    if (avgEcon < ECON_ZERO_BELOW) return 0;
+    const slope = ECON_FACTOR_AT_MID / (ECON_MID - ECON_ZERO_BELOW);
+    return Math.min(ECON_FACTOR_MAX, (avgEcon - ECON_ZERO_BELOW) * slope);
   }
 
   /** 区域平均经济带值（只统计有需求的覆盖地块），用于检视 / 说明。 */
@@ -1553,7 +1970,7 @@ export class RailOperations {
     return null;
   }
 
-  /** 每个工业区按各自的计时器生成货单；目的地是另一个工业区。 */
+  /** 每个工业区每个游戏小时检查一次货单；目的地是另一个工业区。 */
   private advanceCargo(minutes: number): void {
     const groups = new Map<number, { name: string; stations: Station[] }>();
     for (const station of this.network.stationList) {
@@ -1569,56 +1986,62 @@ export class RailOperations {
       if (!groups.has(blobId)) this.cargoTimers.delete(blobId);
     }
 
-    for (const [blobId, group] of groups) {
-      const current = this.cargoTimers.get(blobId);
-      if (current === undefined) {
-        // 首次使用随机相位（0–8 天），避免所有工业区同时生成货单
-        this.cargoTimers.set(blobId, this.rng.range(0, CARGO_ORDER_MAX_MINUTES));
+    for (const [blobId] of groups) {
+      let timer = this.cargoTimers.get(blobId);
+      if (timer === undefined) {
+        // 首次启用：随机相位到下一个整点检查
+        this.cargoTimers.set(blobId, this.rng.range(0, CARGO_ORDER_CHECK_MINUTES));
         continue;
       }
 
-      const next = current - minutes;
-      if (next > 0) {
-        this.cargoTimers.set(blobId, next);
-        continue;
+      timer -= minutes;
+      while (timer <= 0) {
+        timer += CARGO_ORDER_CHECK_MINUTES;
+        this.tryCreateCargoOrder(blobId, groups);
       }
-
-      this.cargoTimers.set(
-        blobId,
-        this.rng.range(CARGO_ORDER_MIN_MINUTES, CARGO_ORDER_MAX_MINUTES),
-      );
-      if (groups.size < 2 || this.cargoOrders.size >= CARGO_MAX_ORDERS) continue;
-
-      const others = [...groups.keys()].filter((id) => id !== blobId);
-      const destBlobId = others[this.rng.int(others.length)];
-      if (destBlobId === undefined) continue;
-      const destGroup = groups.get(destBlobId);
-      if (!destGroup) continue;
-
-      const originStation = group.stations[this.rng.int(group.stations.length)];
-      const destStation = destGroup.stations[this.rng.int(destGroup.stations.length)];
-      if (!originStation || !destStation || originStation.tile === destStation.tile) continue;
-
-      const amount = this.rng.intBetween(CARGO_AMOUNT_MIN, CARGO_AMOUNT_MAX);
-      const reward = this.rng.intBetween(CARGO_REWARD_MIN, CARGO_REWARD_MAX);
-      const order: CargoOrder = {
-        id: this.nextCargoOrderId++,
-        originKey: hexKey(originStation.q, originStation.r),
-        originName: originStation.name,
-        originX: originStation.tile.x,
-        originY: originStation.tile.y,
-        destKey: hexKey(destStation.q, destStation.r),
-        destName: destStation.name,
-        destX: destStation.tile.x,
-        destY: destStation.tile.y,
-        amount,
-        reward,
-        createdAtDay: this.day,
-        truckId: null,
-      };
-      this.cargoOrders.set(order.id, order);
-      this.cargoDispatchCooldown = 0;
+      this.cargoTimers.set(blobId, timer);
     }
+  }
+
+  /** 每个工业区每小时检查一次：5% 概率生成一张货单。 */
+  private tryCreateCargoOrder(
+    blobId: number,
+    groups: Map<number, { name: string; stations: Station[] }>,
+  ): void {
+    if (groups.size < 2 || this.cargoOrders.size >= CARGO_MAX_ORDERS) return;
+    if (!this.rng.chance(CARGO_ORDER_CHANCE_PER_HOUR)) return;
+
+    const group = groups.get(blobId);
+    if (!group) return;
+    const others = [...groups.keys()].filter((id) => id !== blobId);
+    const destBlobId = others[this.rng.int(others.length)];
+    if (destBlobId === undefined) return;
+    const destGroup = groups.get(destBlobId);
+    if (!destGroup) return;
+
+    const originStation = group.stations[this.rng.int(group.stations.length)];
+    const destStation = destGroup.stations[this.rng.int(destGroup.stations.length)];
+    if (!originStation || !destStation || originStation.tile === destStation.tile) return;
+
+    const amount = this.rng.intBetween(CARGO_AMOUNT_MIN, CARGO_AMOUNT_MAX);
+    const reward = this.rng.intBetween(CARGO_REWARD_MIN, CARGO_REWARD_MAX);
+    const order: CargoOrder = {
+      id: this.nextCargoOrderId++,
+      originKey: hexKey(originStation.q, originStation.r),
+      originName: originStation.name,
+      originX: originStation.tile.x,
+      originY: originStation.tile.y,
+      destKey: hexKey(destStation.q, destStation.r),
+      destName: destStation.name,
+      destX: destStation.tile.x,
+      destY: destStation.tile.y,
+      amount,
+      reward,
+      createdAtDay: this.day,
+      truckId: null,
+    };
+    this.cargoOrders.set(order.id, order);
+    this.cargoDispatchCooldown = 0;
   }
 
   /** 货运列车沿轨道移动、装货、卸货与送达。 */
@@ -2232,6 +2655,31 @@ export class RailOperations {
         dir: saved.dir === -1 ? -1 : 1,
         speed: Number.isFinite(saved.speed) ? saved.speed : 0,
         dwellRemaining: Number.isFinite(saved.dwellRemaining) ? saved.dwellRemaining : 0,
+        reposition:
+          lineId !== null &&
+          saved.reposition &&
+          Array.isArray(saved.reposition.points) &&
+          saved.reposition.points.length >= 2 &&
+          Array.isArray(saved.reposition.cumulative) &&
+          Number.isFinite(saved.reposition.length)
+            ? {
+                points: saved.reposition.points.map((point) => ({ x: point.x, y: point.y })),
+                cumulative: saved.reposition.cumulative.map((value) => Number(value) || 0),
+                length: saved.reposition.length,
+                distance: Number.isFinite(saved.reposition.distance)
+                  ? saved.reposition.distance
+                  : 0,
+                nextStopKey: saved.reposition.nextStopKey ?? null,
+                nextStopDistance: Number.isFinite(saved.reposition.nextStopDistance)
+                  ? saved.reposition.nextStopDistance
+                  : 0,
+                passedNextStop: Boolean(saved.reposition.passedNextStop),
+                waitRemaining: Number.isFinite(saved.reposition.waitRemaining)
+                  ? saved.reposition.waitRemaining
+                  : 0,
+                targetStopKey: saved.reposition.targetStopKey ?? '',
+              }
+            : undefined,
         onboard: (saved.onboard ?? []).map((passenger) => this.clonePassenger(passenger)),
         revenueToday: Number.isFinite(saved.revenueToday) ? saved.revenueToday : 0,
         revenueTotal: Number.isFinite(saved.revenueTotal) ? saved.revenueTotal : 0,
@@ -2290,7 +2738,11 @@ export class RailOperations {
       if (!entry || !Number.isFinite(entry.blobId) || !Number.isFinite(entry.minutes)) {
         continue;
       }
-      this.cargoTimers.set(entry.blobId, entry.minutes);
+      // 兼容旧存档的 6–8 天计时器：迁移为“下一次整点检查”
+      this.cargoTimers.set(
+        entry.blobId,
+        Math.max(0, Math.min(CARGO_ORDER_CHECK_MINUTES, entry.minutes)),
+      );
     }
 
     const maxLineId = Math.max(0, ...this.lines.map((line) => line.id));
@@ -2392,6 +2844,9 @@ export class RailOperations {
     if (line) {
       if (line.status !== 'OK') {
         state = '线路断开';
+      } else if (train.reposition) {
+        state = '回送中';
+        nextStopName = line.stops[0]?.name ?? null;
       } else if (train.dwellRemaining > 0) {
         state = '停站中';
         const index = this.currentStopIndex(line, train);

@@ -2,7 +2,7 @@ import { Terrain, TERRAIN_DEFS } from './terrain';
 import type { Tile } from './world';
 
 /** 初始资金。重生成地图会重置到这个数额。 */
-export const STARTING_CREDITS = 200_000;
+export const STARTING_CREDITS = 500_000;
 
 /** 单格轨道基础造价（再乘以地块成本系数）。 */
 export const TRACK_BASE_COST = 6_000;
@@ -10,10 +10,10 @@ export const TRACK_BASE_COST = 6_000;
 /** 拆除返还比例。 */
 export const REFUND_RATE = 0.5;
 
-/** 客运列车运行成本：每格 10 元。 */
-export const PASSENGER_OPEX_PER_HEX = 10;
-/** 货运列车运行成本：每格 5 元。 */
-export const CARGO_OPEX_PER_HEX = 5;
+/** 客运列车运行成本：每格 40 元。 */
+export const PASSENGER_OPEX_PER_HEX = 40;
+/** 货运列车运行成本：每格 20 元。 */
+export const CARGO_OPEX_PER_HEX = 20;
 
 /**
  * 铺轨造价 = 基础价 × 地块系数。
