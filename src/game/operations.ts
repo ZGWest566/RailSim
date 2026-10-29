@@ -82,7 +82,7 @@ export interface Line {
 
 export type PassengerState = 'WAITING' | 'ON_TRAIN' | 'TRANSFERRING' | 'ARRIVED' | 'GAVE_UP';
 
-export type PassengerKind = 'commuter' | 'tourist' | 'worker';
+export type PassengerKind = 'commuter' | 'tourist' | 'business';
 
 export interface PassengerKindDef {
   kind: PassengerKind;
@@ -91,17 +91,17 @@ export interface PassengerKindDef {
   colorCss: string;
 }
 
-/** 乘客类型配色：通勤青、旅游金、务工蓝。 */
+/** 乘客类型配色：通勤青、旅游金、商务蓝。 */
 export const PASSENGER_KIND_DEFS: Record<PassengerKind, PassengerKindDef> = {
   commuter: { kind: 'commuter', name: '通勤', color: 0x6cc4d5, colorCss: '#6cc4d5' },
   tourist: { kind: 'tourist', name: '旅游', color: 0xe9b968, colorCss: '#e9b968' },
-  worker: { kind: 'worker', name: '务工', color: 0x7f9cf5, colorCss: '#7f9cf5' },
+  business: { kind: 'business', name: '商务', color: 0x7f9cf5, colorCss: '#7f9cf5' },
 };
 
 export const PASSENGER_KIND_LIST: PassengerKindDef[] = [
   PASSENGER_KIND_DEFS.commuter,
   PASSENGER_KIND_DEFS.tourist,
-  PASSENGER_KIND_DEFS.worker,
+  PASSENGER_KIND_DEFS.business,
 ];
 
 /** 乘客的一段乘车计划；多段之间在车站换乘。 */
@@ -393,8 +393,15 @@ const TRANSFER_MINUTES = 18;
 const PASSENGER_BUDGET: Record<PassengerKind, number> = {
   commuter: 150,
   tourist: 220,
-  worker: 180,
+  business: 180,
 };
+
+/**
+ * 旅游乘客的最短出行距离（格）。
+ * 旅游泛指长途游客：线网里没有足够远的目的站时，这类乘客不会生成。
+ * 8 格约 40 km。
+ */
+const TOURIST_MIN_DISTANCE_HEX = 8;
 /**
  * 按直线距离补充的路程预算。
  * 先按最慢列车的速度换算每格用时，再留出绕行余量：
@@ -462,8 +469,14 @@ export interface StationFlow {
 interface DestinationCandidate {
   station: Station;
   route: { legs: PassengerLeg[]; cost: number };
-  /** 目的地车站的覆盖格数加权。 */
+  /** 目的地车站的基础权重（覆盖格数）。 */
   weight: number;
+  /** 出发站到目的站的直线距离（格）。 */
+  distance: number;
+  /** 目的站服务范围内的城镇 / 工业地块数。 */
+  townTiles: number;
+  industryTiles: number;
+  demandTiles: number;
 }
 
 
@@ -1494,9 +1507,16 @@ export class RailOperations {
     if (candidates.length === 0) return;
 
     const walkToStation = hexDistance(home, homeStation.tile) * WALK_MINUTES_PER_HEX;
-    const kind = passengerKindFor(home.terrain);
+    const kind = passengerKindFor(this.rng, home.terrain);
     const baseBudget = PASSENGER_BUDGET[kind] * this.rng.range(0.8, 1.4);
-    const weights = candidates.map((candidate) => candidate.weight);
+    const weights = candidates.map((candidate) => {
+      if (kind === 'tourist' && candidate.distance < TOURIST_MIN_DISTANCE_HEX) {
+        return 0;
+      }
+      return this.destinationPreference(kind, candidate);
+    });
+    // 线网里没有足够远的目的站：旅游乘客直接放弃
+    if (!weights.some((weight) => weight > 0)) return;
 
     let chosen: DestinationCandidate | null = null;
     let budget = 0;
@@ -1542,6 +1562,29 @@ export class RailOperations {
     });
   }
 
+  /**
+   * 不同乘客类型对目的站的基础偏好：
+   * - 通勤：越近越优先；
+   * - 旅游：越远越优先；
+   * - 商务：服务范围内城镇 / 工业地块越多越优先。
+   */
+  private destinationPreference(
+    kind: PassengerKind,
+    candidate: DestinationCandidate,
+  ): number {
+    let weight = candidate.weight;
+    if (kind === 'commuter') {
+      weight *= 1 / (1 + candidate.distance / 5);
+    } else if (kind === 'tourist') {
+      weight *= 0.2 + candidate.distance / 8;
+    } else {
+      const demand = Math.max(4, candidate.demandTiles);
+      weight *=
+        1 + ((candidate.townTiles + candidate.industryTiles * 1.5) / demand) * 1.2;
+    }
+    return Math.max(0, weight);
+  }
+
   /** 从当前上车站出发，服务图可达的所有客运站；按目的地车站覆盖格数加权。 */
   private destinationCandidates(
     origin: Station,
@@ -1557,10 +1600,20 @@ export class RailOperations {
       const key = hexKey(station.q, station.r);
       const route = this.findPassengerRoute(originKey, key);
       if (!route) continue;
+      let townTiles = 0;
+      let industryTiles = 0;
+      for (const tile of station.coverage) {
+        if (tile.terrain === Terrain.Town) townTiles++;
+        else if (tile.terrain === Terrain.Industry) industryTiles++;
+      }
       candidates.push({
         station,
         route,
         weight: 1 + station.coverage.length * 0.02,
+        distance: hexDistance(origin.tile, station.tile),
+        townTiles,
+        industryTiles,
+        demandTiles: station.demandTiles,
       });
     }
     cache.set(originKey, candidates);
@@ -2656,8 +2709,12 @@ export class RailOperations {
   /* ------------------------------ 存档 ------------------------------ */
 
   private clonePassenger(passenger: Passenger): Passenger {
+    // 旧存档中的“务工”已改名为“商务”
+    const kind: PassengerKind =
+      (passenger.kind as string) === 'worker' ? 'business' : passenger.kind;
     return {
       ...passenger,
+      kind,
       route: (passenger.route ?? []).map((leg) => ({ ...leg })),
     };
   }
@@ -3256,8 +3313,28 @@ function clockLabel(minuteOfDay: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 }
 
-function passengerKindFor(terrain: Terrain): PassengerKind {
-  if (terrain === Terrain.Farmland) return 'tourist';
-  if (terrain === Terrain.Industry) return 'worker';
-  return 'commuter';
+const PASSENGER_KIND_ORDER: PassengerKind[] = ['commuter', 'tourist', 'business'];
+
+/**
+ * 不同出发地块的乘客类型权重。
+ * 城镇地块明显更容易产生旅游乘客，因此城市车站的旅游客流更多。
+ */
+function passengerKindWeights(terrain: Terrain): readonly number[] {
+  switch (terrain) {
+    case Terrain.Town:
+      return [0.35, 0.3, 0.35];
+    case Terrain.Industry:
+      return [0.25, 0.05, 0.7];
+    case Terrain.Suburb:
+      return [0.65, 0.15, 0.2];
+    case Terrain.Farmland:
+      return [0.55, 0.3, 0.15];
+    default:
+      return [0.4, 0.2, 0.4];
+  }
+}
+
+function passengerKindFor(rng: Rng, terrain: Terrain): PassengerKind {
+  const index = rng.weightedIndex(passengerKindWeights(terrain));
+  return PASSENGER_KIND_ORDER[index] ?? 'commuter';
 }
