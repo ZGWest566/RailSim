@@ -2217,10 +2217,11 @@ body.station-mode .toast {
 }
 
 .tip-label {
-  width: 34px;
+  width: 44px;
   flex: none;
   color: var(--muted-2);
   font-size: 9px;
+  white-space: nowrap;
 }
 
 .tip-value {
