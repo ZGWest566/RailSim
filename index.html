@@ -38,6 +38,7 @@
           </div>
           <button class="btn btn-ghost tutorial-button" id="tutorial-button" title="查看教程">教程</button>
           <button class="btn btn-ghost garage-button" id="garage-button" title="车库">车库</button>
+          <button class="btn btn-ghost expand-button" id="expand-button" title="开拓新区域">开拓</button>
           <div class="speed-group" role="group" aria-label="时间控制">
             <button class="speed-btn" data-speed="0" title="暂停">❚❚</button>
             <button class="speed-btn is-active" data-speed="1" title="1× 速度">▶</button>
@@ -173,6 +174,7 @@
             <div class="facility-stats">
               <div><span>覆盖</span><strong id="facility-coverage">—</strong></div>
               <div><span>连通</span><strong id="facility-connect">—</strong></div>
+              <div><span>线网加成</span><strong id="facility-bonus">—</strong></div>
             </div>
           </div>
 
@@ -253,6 +255,39 @@
         </div>
       </div>
 
+      <div class="modal hidden" id="expand-modal" role="dialog" aria-modal="true" aria-labelledby="expand-title">
+        <div class="modal-backdrop" id="expand-backdrop"></div>
+        <div class="modal-card expand-card" id="expand-card" tabindex="-1">
+          <div class="modal-head">
+            <div>
+              <h2 id="expand-title">开拓新区域</h2>
+              <p class="panel-sub">向现有地图外继续生成</p>
+            </div>
+            <button class="btn btn-icon" id="expand-close" aria-label="关闭开拓面板">×</button>
+          </div>
+
+          <div class="expand-body">
+            <p class="expand-desc">
+              在现有版图旁新增一块地图区域，可能出现新的城镇、工业区、湖泊与河流。开拓后可以直接在新区域铺轨建站。
+            </p>
+            <div class="expand-stats">
+              <div><span>已有区域</span><strong id="expand-regions">1 块</strong></div>
+              <div><span>地图格数</span><strong id="expand-tiles">—</strong></div>
+              <div><span>费用</span><strong id="expand-cost">¥ 1,000,000</strong></div>
+              <div><span>当前资金</span><strong id="expand-money">¥ 500,000</strong></div>
+            </div>
+            <p class="expand-direction-label">选择开拓方向</p>
+            <div class="expand-directions" id="expand-directions"></div>
+            <p class="expand-hint" id="expand-hint">第一次开拓需要 ¥1,000,000，之后每次翻倍。</p>
+          </div>
+
+          <div class="expand-actions">
+            <button class="btn" id="expand-cancel">取消</button>
+            <button class="btn btn-primary" id="expand-confirm">开拓新区域</button>
+          </div>
+        </div>
+      </div>
+
       <div class="modal hidden" id="start-modal" role="dialog" aria-modal="true" aria-labelledby="start-title">
         <div class="modal-backdrop" id="start-backdrop"></div>
         <div class="modal-card start-card" id="start-card" tabindex="-1">
@@ -290,11 +325,6 @@
               <div class="start-field">
                 <span>地名文化</span>
                 <div class="start-options" id="start-cultures"></div>
-              </div>
-
-              <div class="start-field">
-                <span>地图大小</span>
-                <div class="start-options" id="start-sizes"></div>
               </div>
 
               <label class="start-slider">
@@ -354,6 +384,11 @@
             <section class="tutorial-section">
               <h3>货运</h3>
               <p>在工业区旁建造货运站，工业区会陆续产生货单。货运列车不需要线路，会自动沿轨道接单、装货并送到目的地。</p>
+            </section>
+
+            <section class="tutorial-section">
+              <h3>开拓新区域</h3>
+              <p>整张初始地图是一块大区域。顶栏「开拓」可以选择东 / 东北 / 西北 / 西 / 西南 / 东南方向，新增一块与现有版图衔接的区域。第一次需要 ¥1,000,000，之后每次翻倍；新区域会出现新的城镇、工业区、湖泊与河流，可以直接铺轨建站。</p>
             </section>
 
             <section class="tutorial-section">

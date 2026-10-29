@@ -21,15 +21,14 @@ import { TRAIN_MODEL_LIST } from '../game/trains';
 import { TERRAIN_DEFS, TERRAIN_LIST } from '../game/terrain';
 import { generateWorld } from '../game/mapgen';
 import { NAME_CULTURES, type NameCulture } from '../game/names';
-import { HEX_SIZE, MAP_SIZE_PRESETS, type MapSize } from '../config';
+import { HEX_SIZE } from '../config';
 import { hashSeed } from '../core/rng';
-import { hexCorners } from '../core/hex';
+import { DIRECTION_NAMES, hexCorners } from '../core/hex';
 import type { Tile, World } from '../game/world';
 import type { BuildTool } from '../core/emitter';
 
 export interface StartSettings {
   seedText: string;
-  size: MapSize;
   culture: NameCulture;
   elevationOffset: number;
   moistureOffset: number;
@@ -37,6 +36,13 @@ export interface StartSettings {
 
 export interface StartScreenDefaults extends StartSettings {
   hasSave: boolean;
+}
+
+export interface ExpansionInfo {
+  expansions: number;
+  regions: number;
+  tiles: number;
+  cost: number;
 }
 
 
@@ -47,6 +53,8 @@ export interface HudHandlers {
   stationType(type: StationType): void;
   setSpeed(speed: number): void;
   tileInfo(tile: Tile): TileNetworkInfo;
+  /** 车站所在可达线网的客流加成。 */
+  stationNetworkBonus(stationId: number): number;
   buildTrack(tile: Tile): void;
   buildStation(tile: Tile): void;
   remove(tile: Tile): void;
@@ -63,6 +71,8 @@ export interface HudHandlers {
   unassignTrain(trainId: number): void;
   startNewGame(settings: StartSettings): void;
   continueGame(): void;
+  expansionInfo(): ExpansionInfo;
+  expandRegion(direction: number): void;
 }
 
 export interface Hud {
@@ -126,6 +136,7 @@ export function createHud(handlers: HudHandlers): Hud {
   const facilityType = el<HTMLElement>('facility-type');
   const facilityCoverage = el<HTMLElement>('facility-coverage');
   const facilityConnect = el<HTMLElement>('facility-connect');
+  const facilityBonus = el<HTMLElement>('facility-bonus');
   const actionTrack = el<HTMLButtonElement>('action-track');
   const actionStation = el<HTMLButtonElement>('action-station');
   const actionRemove = el<HTMLButtonElement>('action-remove');
@@ -174,6 +185,20 @@ export function createHud(handlers: HudHandlers): Hud {
   const garageMoney = el<HTMLElement>('garage-money');
   const garageBody = el<HTMLDivElement>('garage-body');
 
+  const expandButton = el<HTMLButtonElement>('expand-button');
+  const expandModal = el<HTMLDivElement>('expand-modal');
+  const expandCard = el<HTMLDivElement>('expand-card');
+  const expandBackdrop = el<HTMLDivElement>('expand-backdrop');
+  const expandClose = el<HTMLButtonElement>('expand-close');
+  const expandCancel = el<HTMLButtonElement>('expand-cancel');
+  const expandConfirm = el<HTMLButtonElement>('expand-confirm');
+  const expandRegions = el<HTMLElement>('expand-regions');
+  const expandTiles = el<HTMLElement>('expand-tiles');
+  const expandCost = el<HTMLElement>('expand-cost');
+  const expandMoney = el<HTMLElement>('expand-money');
+  const expandDirections = el<HTMLDivElement>('expand-directions');
+  const expandHint = el<HTMLElement>('expand-hint');
+
   const tutorialButton = el<HTMLButtonElement>('tutorial-button');
   const tutorialModal = el<HTMLDivElement>('tutorial-modal');
   const tutorialBackdrop = el<HTMLDivElement>('tutorial-backdrop');
@@ -186,7 +211,6 @@ export function createHud(handlers: HudHandlers): Hud {
   const startSeed = el<HTMLInputElement>('start-seed');
   const startRandom = el<HTMLButtonElement>('start-random');
   const startCultures = el<HTMLDivElement>('start-cultures');
-  const startSizes = el<HTMLDivElement>('start-sizes');
   const startMoisture = el<HTMLInputElement>('start-moisture');
   const startElevation = el<HTMLInputElement>('start-elevation');
   const startMoistureVal = el<HTMLElement>('start-moisture-val');
@@ -213,6 +237,9 @@ export function createHud(handlers: HudHandlers): Hud {
   let lineDraft: DraftLine | null = null;
   let revenueToday = 0;
   let opexToday = 0;
+  let lastCredits = 500_000;
+  let expandOpen = false;
+  let selectedDirection: number | null = null;
   /** 当前模拟速度与暂停前的速度，供空格键恢复。 */
   let currentSpeed = 1;
   let resumeSpeed = 1;
@@ -222,7 +249,6 @@ export function createHud(handlers: HudHandlers): Hud {
   let garagePreferredLineId: number | null = null;
   let tutorialOpen = false;
   let startOpen = false;
-  let startSize: MapSize = 'small';
   let startCulture: NameCulture = 'chinese';
   let startHasSave = false;
   let startPreviewTimer = 0;
@@ -296,6 +322,69 @@ export function createHud(handlers: HudHandlers): Hud {
   tutorialClose.addEventListener('click', closeTutorial);
   tutorialStart.addEventListener('click', closeTutorial);
 
+  /* ------------------------------ 开拓新区域 ------------------------------ */
+
+  const expandDirectionButtons: HTMLButtonElement[] = [];
+  for (let direction = 0; direction < 6; direction++) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'expand-direction';
+    button.dataset.direction = String(direction);
+    button.textContent = DIRECTION_NAMES[direction] ?? `方向 ${direction + 1}`;
+    button.addEventListener('click', () => {
+      selectedDirection = direction;
+      refreshExpandModal();
+    });
+    expandDirections.append(button);
+    expandDirectionButtons.push(button);
+  }
+
+  function refreshExpandModal(): void {
+    const info = handlers.expansionInfo();
+    const enough = lastCredits >= info.cost;
+    expandRegions.textContent = `${info.regions} 块`;
+    expandTiles.textContent = `${info.tiles.toLocaleString('en-US')} 格`;
+    expandCost.textContent = formatMoney(info.cost);
+    expandMoney.textContent = formatMoney(lastCredits);
+    for (const [index, button] of expandDirectionButtons.entries()) {
+      button.classList.toggle('is-active', index === selectedDirection);
+    }
+    expandConfirm.disabled = !enough || selectedDirection === null;
+    if (!enough) {
+      expandHint.textContent = `资金不足，还差 ${formatMoney(info.cost - lastCredits)}。`;
+    } else if (selectedDirection === null) {
+      expandHint.textContent = `第 ${info.expansions + 1} 次开拓，请选择方向。`;
+    } else {
+      expandHint.textContent = `将在${DIRECTION_NAMES[selectedDirection] ?? '外侧'}继续生成一块新区域，之后费用翻倍。`;
+    }
+  }
+
+  function openExpandModal(): void {
+    expandOpen = true;
+    selectedDirection = null;
+    refreshExpandModal();
+    expandModal.classList.remove('hidden');
+    expandCard.focus();
+  }
+
+  function closeExpandModal(): void {
+    if (!expandOpen) return;
+    expandOpen = false;
+    expandModal.classList.add('hidden');
+    expandButton.focus();
+  }
+
+  expandButton.addEventListener('click', openExpandModal);
+  expandBackdrop.addEventListener('click', closeExpandModal);
+  expandClose.addEventListener('click', closeExpandModal);
+  expandCancel.addEventListener('click', closeExpandModal);
+  expandConfirm.addEventListener('click', () => {
+    if (selectedDirection === null) return;
+    const direction = selectedDirection;
+    closeExpandModal();
+    handlers.expandRegion(direction);
+  });
+
   /* ------------------------------ 开始界面 ------------------------------ */
 
   const startCultureButtons: { button: HTMLButtonElement; id: NameCulture }[] = [];
@@ -313,24 +402,6 @@ export function createHud(handlers: HudHandlers): Hud {
     });
     startCultures.append(button);
     startCultureButtons.push({ button, id: culture.id });
-  }
-
-  const startSizeButtons: { button: HTMLButtonElement; id: MapSize }[] = [];
-  for (const size of ['small', 'medium', 'large'] as MapSize[]) {
-    const preset = MAP_SIZE_PRESETS[size];
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'start-option';
-    button.dataset.size = size;
-    button.textContent = preset.label;
-    button.title = preset.hint;
-    button.addEventListener('click', () => {
-      startSize = size;
-      updateStartOptions();
-      scheduleStartPreview(0);
-    });
-    startSizes.append(button);
-    startSizeButtons.push({ button, id: size });
   }
 
   function seedValue(text: string): number {
@@ -362,9 +433,6 @@ export function createHud(handlers: HudHandlers): Hud {
     for (const { button, id } of startCultureButtons) {
       button.classList.toggle('is-active', id === startCulture);
     }
-    for (const { button, id } of startSizeButtons) {
-      button.classList.toggle('is-active', id === startSize);
-    }
     startMoistureVal.textContent = offsetLabel(startMoisture.value);
     startElevationVal.textContent = offsetLabel(startElevation.value);
   }
@@ -380,12 +448,10 @@ export function createHud(handlers: HudHandlers): Hud {
 
   function renderStartPreview(): void {
     if (!startOpen) return;
-    const preset = MAP_SIZE_PRESETS[startSize];
     const seed = seedValue(startSeed.value);
     try {
       const world = generateWorld({
         seed,
-        radius: preset.radius,
         elevationOffset: Number(startElevation.value) / 100,
         moistureOffset: Number(startMoisture.value) / 100,
         culture: startCulture,
@@ -398,7 +464,7 @@ export function createHud(handlers: HudHandlers): Hud {
       const samples = names.length > 0
         ? names
         : world.blobs.slice(0, 3).map((blob) => blob.name);
-      startPreviewMeta.textContent = `${preset.label}地图 · ${world.stats.total} 格`;
+      startPreviewMeta.textContent = `标准地图 · ${world.stats.total} 格`;
       startSampleNames.textContent = samples.length > 0 ? `地名示例：${samples.join(' · ')}` : '';
     } catch (error) {
       console.warn('[RailSim] 预览生成失败', error);
@@ -462,7 +528,6 @@ export function createHud(handlers: HudHandlers): Hud {
   function openStartScreen(defaults: StartScreenDefaults): void {
     startOpen = true;
     startHasSave = defaults.hasSave;
-    startSize = defaults.size;
     startCulture = defaults.culture;
     startSeed.value = defaults.seedText;
     startMoisture.value = String(clampPercent(defaults.moistureOffset * 100));
@@ -510,7 +575,6 @@ export function createHud(handlers: HudHandlers): Hud {
     startSeed.value = seedText;
     const settings: StartSettings = {
       seedText,
-      size: startSize,
       culture: startCulture,
       elevationOffset: Number(startElevation.value) / 100,
       moistureOffset: Number(startMoisture.value) / 100,
@@ -727,11 +791,15 @@ export function createHud(handlers: HudHandlers): Hud {
     statClock.textContent = view.time;
     revenueToday = view.revenueToday;
     opexToday = view.opexToday;
+    lastCredits = credits;
     moneyEl.textContent = formatMoney(credits);
     moneyEl.classList.toggle('is-low', credits < 60_000);
     if (lastStats) lastStats.credits = credits;
     updateNetworkNote();
     if (garageOpen) garageMoney.textContent = formatMoney(credits);
+    const expansion = handlers.expansionInfo();
+    expandButton.title = `开拓新区域 · ${formatMoney(expansion.cost)}`;
+    if (expandOpen) refreshExpandModal();
   }
 
   /* ------------------------------ 悬停浮层 ------------------------------ */
@@ -745,7 +813,7 @@ export function createHud(handlers: HudHandlers): Hud {
 
     const signature =
       tooltip.kind === 'station'
-        ? `s|${tooltip.station.key}|${tooltip.station.waiting}|${tooltip.station.transferring}|${tooltip.station.cargoWaiting}|${tooltip.station.boardedToday}|${tooltip.station.deliveredToday}|${tooltip.station.coverage}|${tooltip.station.demandTiles}|${tooltip.station.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.station.destinations.map((item) => `${item.name}:${item.count}`).join(',')}|${tooltip.station.lines.map((line) => line.name).join(',')}`
+        ? `s|${tooltip.station.key}|${tooltip.station.waiting}|${tooltip.station.transferring}|${tooltip.station.cargoWaiting}|${tooltip.station.networkBonus}|${tooltip.station.boardedToday}|${tooltip.station.deliveredToday}|${tooltip.station.coverage}|${tooltip.station.demandTiles}|${tooltip.station.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.station.destinations.map((item) => `${item.name}:${item.count}`).join(',')}|${tooltip.station.lines.map((line) => line.name).join(',')}`
         : tooltip.kind === 'truck'
           ? `k|${tooltip.truck.id}|${tooltip.truck.state}|${tooltip.truck.loaded}|${tooltip.truck.order?.originName ?? ''}|${tooltip.truck.order?.destName ?? ''}|${tooltip.truck.order?.amount ?? 0}|${tooltip.truck.order?.reward ?? 0}|${tooltip.truck.revenueToday}|${tooltip.truck.deliveriesToday}|${tooltip.truck.opexToday}|${tooltip.truck.opexTotal}`
           : `t|${tooltip.train.id}|${tooltip.train.lineName}|${tooltip.train.state}|${tooltip.train.speed}|${tooltip.train.onboard}|${tooltip.train.carLoads.join(',')}|${tooltip.train.kinds.map((item) => `${item.kind}:${item.count}`).join(',')}|${tooltip.train.nextStopName}|${tooltip.train.revenueToday}|${tooltip.train.deliveredToday}|${tooltip.train.opexToday}|${tooltip.train.opexTotal}|${tooltip.train.destinations.map((item) => `${item.name}:${item.count}`).join(',')}`;
@@ -790,6 +858,7 @@ export function createHud(handlers: HudHandlers): Hud {
           mapTooltip.append(
             tipSub(`覆盖 ${station.coverage} / ${station.demandTiles} 格`),
           );
+          mapTooltip.append(tipRow('线网加成', `×${station.networkBonus.toFixed(2)}`));
           mapTooltip.append(tipRow('候车', `${station.waiting} 人${station.transferring > 0 ? `（换乘 ${station.transferring}）` : ''}`));
           const stationKinds = tipKindRow(station.kinds);
           if (stationKinds) mapTooltip.append(stationKinds);
@@ -1015,6 +1084,10 @@ export function createHud(handlers: HudHandlers): Hud {
     facilityConnect.textContent = disconnected
       ? '孤立'
       : `${station.connectedStations} 站同网`;
+    facilityBonus.textContent =
+      station.type === 'freight'
+        ? '—'
+        : `×${handlers.stationNetworkBonus(station.id).toFixed(2)}`;
   }
 
   function renderActions(info: TileNetworkInfo): void {

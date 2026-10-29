@@ -129,9 +129,10 @@ const CULTURE_NAMES: Record<NameCulture, CultureNames> = {
 export function createNamer(
   culture: NameCulture,
   rng: Rng,
+  taken?: Iterable<string>,
 ): (kind: 'town' | 'industry') => string {
   const names = CULTURE_NAMES[culture] ?? CULTURE_NAMES.chinese;
-  const used = new Set<string>();
+  const used = new Set<string>(taken ?? []);
 
   return (kind) => {
     const prefixes = kind === 'town' ? names.townPrefix : names.industryPrefix;

@@ -232,6 +232,8 @@ export interface StationFlowView {
   transferring: number;
   /** 本站作为起点的待运货单数（货运站）。 */
   cargoWaiting: number;
+  /** 本站所在可达线网的客流加成系数。 */
+  networkBonus: number;
   boardedToday: number;
   deliveredToday: number;
   boardedTotal: number;
@@ -445,7 +447,7 @@ function networkTileWeight(terrain: Terrain): number {
 }
 
 /** 每点线网系数带来的客流加成。 */
-const NETWORK_BONUS_PER_COEF = 0.01;
+const NETWORK_BONUS_PER_COEF = 0.001;
 
 export interface StationFlow {
   key: string;
@@ -489,7 +491,7 @@ export class RailOperations {
   private readonly cargoOrders = new Map<number, CargoOrder>();
   private readonly truckMap = new Map<number, Truck>();
   private readonly cargoTimers = new Map<number, number>();
-  private readonly demandTiles: Tile[];
+  private demandTiles: Tile[];
   private readonly rng: Rng;
   private demandMinuteCarry = 0;
   private cargoDispatchCooldown = 0;
@@ -518,6 +520,11 @@ export class RailOperations {
     this.network = network;
     this.rng = new Rng(world.seed ^ 0x51ed270b);
     this.demandTiles = world.list.filter((tile) => isDemandTile(tile));
+  }
+
+  /** 地图开拓后刷新需求地块索引，让新区域参与客流生成。 */
+  refreshWorld(): void {
+    this.demandTiles = this.world.list.filter((tile) => isDemandTile(tile));
   }
 
   get lines(): Line[] {
@@ -2922,6 +2929,11 @@ export class RailOperations {
     })).filter((item) => item.count > 0);
   }
 
+  /** 指定客运站所在可达线网的客流加成；货运站或未连线时返回 1。 */
+  networkBonusForStation(stationId: number): number {
+    return this.networkScaleFactors().get(stationId) ?? 1;
+  }
+
   stationInfo(tile: Tile): StationFlowView | null {
     const station = this.network.stationAt(tile);
     if (!station) return null;
@@ -2939,6 +2951,8 @@ export class RailOperations {
     const lines = this.lines
       .filter((line) => line.stops.some((stop) => stop.key === key))
       .map((line) => ({ name: line.name, colorCss: line.colorCss }));
+    const networkBonus =
+      station.type === 'freight' ? 1 : (this.networkScaleFactors().get(station.id) ?? 1);
     return {
       key,
       name: station.name,
@@ -2946,6 +2960,7 @@ export class RailOperations {
       waiting: waiting.length,
       transferring,
       cargoWaiting: this.cargoWaitingAt(key),
+      networkBonus,
       boardedToday: flow.boardedToday,
       deliveredToday: flow.deliveredToday,
       boardedTotal: flow.boardedTotal,

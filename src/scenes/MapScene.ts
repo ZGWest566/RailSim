@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { CAMERA_MAX_ZOOM, CAMERA_MIN_ZOOM, HEX_SIZE, SEA_LEVEL } from '../config';
+import { CAMERA_MAX_ZOOM, CAMERA_MIN_ZOOM, HEX_SIZE, REGION_SPACING, SEA_LEVEL } from '../config';
 import { bus, type BuildTool } from '../core/emitter';
 import {
   clamp,
@@ -16,7 +16,8 @@ import { RailOperations, PASSENGER_KIND_DEFS, type Line, type Train } from '../g
 import type { Truck } from '../game/cargo';
 import { STATION_DEFS, type StationDef, type StationType } from '../game/stations';
 import { TERRAIN_DEFS, Terrain } from '../game/terrain';
-import type { MapBlob, Tile, World } from '../game/world';
+import type { MapBlob, RegionCoord, Tile, World } from '../game/world';
+import { regionCenterPixel } from '../game/mapgen';
 
 interface PointerDownState {
   x: number;
@@ -33,7 +34,6 @@ interface BlobLabel {
 
 const COLORS = {
   backdrop: 0x0b1a24,
-  ocean: 0x0d2230,
   coast: 0xa5d8e2,
   grid: 0x0b141a,
   hover: 0xffffff,
@@ -63,8 +63,10 @@ export class MapScene extends Phaser.Scene {
   private stationDotsGfx!: Phaser.GameObjects.Graphics;
   private trainGfx!: Phaser.GameObjects.Graphics;
   private truckGfx!: Phaser.GameObjects.Graphics;
+  private unlockGfx!: Phaser.GameObjects.Graphics;
   private hoverGfx!: Phaser.GameObjects.Graphics;
   private selectGfx!: Phaser.GameObjects.Graphics;
+  private unlockWave: { startedAt: number; cx: number; cy: number; size: number } | null = null;
 
   private readonly corners = hexCorners(HEX_SIZE);
   private labels: BlobLabel[] = [];
@@ -126,6 +128,7 @@ export class MapScene extends Phaser.Scene {
     this.truckGfx = this.add.graphics().setDepth(6.9);
     this.stationGfx = this.add.graphics().setDepth(7);
     this.stationDotsGfx = this.add.graphics().setDepth(7.2);
+    this.unlockGfx = this.add.graphics().setDepth(8.5);
     this.hoverGfx = this.add.graphics().setDepth(9);
     this.selectGfx = this.add.graphics().setDepth(10);
 
@@ -156,6 +159,19 @@ export class MapScene extends Phaser.Scene {
     this.network = network;
     this.operations = operations;
     this.buildWorld(world, true);
+    this.emitZoom();
+  }
+
+  /** 开拓一块新区域后重绘整张图，并在新区域上播放金色扩散波。 */
+  expandRegion(region: RegionCoord): void {
+    this.buildWorld(this.world, true);
+    const center = regionCenterPixel(region);
+    this.unlockWave = {
+      startedAt: this.time.now,
+      cx: center.x,
+      cy: center.y,
+      size: HEX_SIZE * REGION_SPACING,
+    };
     this.emitZoom();
   }
 
@@ -350,6 +366,8 @@ export class MapScene extends Phaser.Scene {
     this.lineEditorActive = false;
     this.hoverGfx.clear();
     this.selectGfx.clear();
+    this.unlockGfx.clear();
+    this.unlockWave = null;
     this.routeGfx.clear();
     this.trainGfx.clear();
     this.truckGfx.clear();
@@ -388,8 +406,8 @@ export class MapScene extends Phaser.Scene {
     const g = this.terrainGfx;
     g.clear();
 
-    // 地图之外的深海底色，让六边形圆盘的边缘自然融入背景
-    g.fillStyle(COLORS.ocean, 1);
+    // 地图之外的底色；地图不再有固定海洋边界，开拓后新地形会直接接上
+    g.fillStyle(COLORS.backdrop, 1);
     g.fillRect(-4000, -4000, 8000, 8000);
 
     for (const tile of this.world.list) {
@@ -431,7 +449,7 @@ export class MapScene extends Phaser.Scene {
       for (let d = 0; d < 6; d++) {
         const dir = HEX_DIRECTIONS[d]!;
         const neighbor = this.world.get(tile.q + dir.q, tile.r + dir.r);
-        if (neighbor && neighbor.terrain !== Terrain.Water) continue;
+        if (!neighbor || neighbor.terrain !== Terrain.Water) continue;
         const edge = (6 - d) % 6;
         const a = points[edge]!;
         const b = points[(edge + 1) % 6]!;
@@ -456,6 +474,39 @@ export class MapScene extends Phaser.Scene {
         }
       }
     }
+  }
+
+  /** 开拓新区域时，从旧边界向新边界扩散的一圈金色波纹。 */
+  private drawUnlockWave(time: number): void {
+    const wave = this.unlockWave;
+    if (!wave) return;
+
+    const duration = 1700;
+    const progress = (time - wave.startedAt) / duration;
+    const g = this.unlockGfx;
+    g.clear();
+    if (progress >= 1) {
+      this.unlockWave = null;
+      return;
+    }
+
+    const eased = 1 - (1 - progress) * (1 - progress);
+    const size = wave.size * (0.25 + eased * 0.75);
+    const alpha = Math.max(0, 1 - progress);
+
+    const outer = hexCorners(size).map(
+      (p) => new Phaser.Math.Vector2(wave.cx + p.x, wave.cy + p.y),
+    );
+    g.lineStyle(7, 0xe9b968, alpha * 0.55);
+    g.strokePoints(outer, true);
+    g.lineStyle(2.5, 0xfff1c9, alpha);
+    g.strokePoints(outer, true);
+
+    const inner = hexCorners(size * 0.975).map(
+      (p) => new Phaser.Math.Vector2(wave.cx + p.x, wave.cy + p.y),
+    );
+    g.lineStyle(1, 0xfff1c9, alpha * 0.4);
+    g.strokePoints(inner, true);
   }
 
   private drawDetails(): void {
@@ -1523,8 +1574,10 @@ export class MapScene extends Phaser.Scene {
   fitToMap(): void {
     const cam = this.cameras.main;
     const safe = this.safeArea();
-    const mapW = SQRT3 * HEX_SIZE * (2 * this.world.radius + 1);
-    const mapH = 1.5 * HEX_SIZE * (2 * this.world.radius + 1) + HEX_SIZE;
+    const bounds = this.world.bounds;
+    const padding = HEX_SIZE * 2;
+    const mapW = Math.max(HEX_SIZE * 6, bounds.width + padding * 2);
+    const mapH = Math.max(HEX_SIZE * 6, bounds.height + padding * 2);
     const zoom = clamp(
       Math.min((safe.right - safe.left) / (mapW * 1.05), (safe.bottom - safe.top) / (mapH * 1.05)),
       CAMERA_MIN_ZOOM,
@@ -1532,7 +1585,7 @@ export class MapScene extends Phaser.Scene {
     );
 
     cam.setZoom(zoom);
-    cam.centerOn(0, 0);
+    cam.centerOn(bounds.cx, bounds.cy);
     cam.scrollX += (this.scale.width / 2 - safe.cx) / zoom;
     cam.scrollY += (this.scale.height / 2 - safe.cy) / zoom;
 
@@ -1571,14 +1624,15 @@ export class MapScene extends Phaser.Scene {
 
   private clampCamera(): void {
     const cam = this.cameras.main;
-    const halfW = (SQRT3 * HEX_SIZE * (2 * this.world.radius + 1)) / 2;
-    const halfH = (1.5 * HEX_SIZE * (2 * this.world.radius + 1)) / 2;
+    const bounds = this.world.bounds;
+    const halfW = Math.max(HEX_SIZE * 4, bounds.width / 2);
+    const halfH = Math.max(HEX_SIZE * 4, bounds.height / 2);
     const limitX = halfW * 0.9;
     const limitY = halfH * 0.9;
     const midX = cam.scrollX + this.scale.width / 2;
     const midY = cam.scrollY + this.scale.height / 2;
-    const targetX = clamp(midX, -limitX, limitX);
-    const targetY = clamp(midY, -limitY, limitY);
+    const targetX = clamp(midX, bounds.cx - limitX, bounds.cx + limitX);
+    const targetY = clamp(midY, bounds.cy - limitY, bounds.cy + limitY);
     cam.scrollX += targetX - midX;
     cam.scrollY += targetY - midY;
   }
@@ -1974,7 +2028,7 @@ export class MapScene extends Phaser.Scene {
     };
   }
 
-  update(_time: number, delta: number): void {
+  update(time: number, delta: number): void {
     const cam = this.cameras.main;
     if (this.panKeys && !isTypingTarget()) {
       const speed = (820 * delta) / 1000 / cam.zoom;
@@ -1999,6 +2053,7 @@ export class MapScene extends Phaser.Scene {
 
     // 拖拽/缩放的钳制：保持世界中心不远离地图
     this.clampCamera();
+    this.drawUnlockWave(time);
 
     if (this.operations) {
       this.operations.update((delta / 1000) * this.simSpeed);

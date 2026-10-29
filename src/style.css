@@ -696,6 +696,10 @@ button {
   gap: 5px;
 }
 
+.facility-stats > div:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .facility-stats span {
   font-size: 9.5px;
   color: var(--muted-2);
@@ -1452,6 +1456,114 @@ body.station-mode .toast {
   color: var(--gold);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+
+.expand-button {
+  flex: none;
+  border-color: rgba(233, 185, 104, 0.35);
+  color: var(--gold);
+}
+
+.expand-button:hover {
+  border-color: rgba(233, 185, 104, 0.6);
+  background: rgba(233, 185, 104, 0.08);
+}
+
+.expand-card {
+  width: min(520px, 92vw);
+}
+
+.expand-card:focus {
+  outline: none;
+}
+
+.expand-body {
+  padding: 2px 18px 0;
+}
+
+.expand-desc {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.expand-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.expand-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.expand-stats span {
+  font-size: 10px;
+  color: var(--muted-2);
+}
+
+.expand-stats strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.expand-direction-label {
+  margin: 14px 0 7px;
+  color: var(--muted-2);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.expand-directions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+}
+
+.expand-direction {
+  padding: 8px 6px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.expand-direction:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.expand-direction.is-active {
+  border-color: rgba(233, 185, 104, 0.65);
+  background: rgba(233, 185, 104, 0.1);
+  color: var(--gold);
+}
+
+.expand-hint {
+  margin: 12px 0 0;
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.expand-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 18px 18px;
 }
 
 /* ------------------------------------------------------------------ */

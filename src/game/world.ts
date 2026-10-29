@@ -50,25 +50,60 @@ export interface WorldStats {
   counts: Record<Terrain, number>;
 }
 
+/** 大区域坐标：每块区域相当于宏观地图上的一个格子。 */
+export interface RegionCoord {
+  q: number;
+  r: number;
+}
+
+export interface WorldBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+}
+
 /** 一次生成后的世界数据容器。生成逻辑在 mapgen.ts，这里只负责索引与查询。 */
 export class World {
   readonly seed: number;
-  readonly radius: number;
   readonly tiles = new Map<string, Tile>();
   readonly list: Tile[] = [];
   readonly blobs: MapBlob[] = [];
   readonly blobById = new Map<number, MapBlob>();
+  /** 已解锁的大区域，按开拓顺序保存；第一项固定是初始区域 (0,0)。 */
+  readonly regions: RegionCoord[] = [];
+  readonly regionKeys = new Set<string>();
+  bounds: WorldBounds = {
+    minX: 0,
+    minY: 0,
+    maxX: 0,
+    maxY: 0,
+    cx: 0,
+    cy: 0,
+    width: 0,
+    height: 0,
+  };
   spawn: Axial = { q: 0, r: 0 };
   stats: WorldStats = emptyStats();
 
-  constructor(seed: number, radius: number) {
+  constructor(seed: number) {
     this.seed = seed;
-    this.radius = radius;
   }
 
   addTile(tile: Tile): void {
     this.tiles.set(hexKey(tile.q, tile.r), tile);
     this.list.push(tile);
+  }
+
+  addRegion(region: RegionCoord): void {
+    const key = `${region.q},${region.r}`;
+    if (this.regionKeys.has(key)) return;
+    this.regionKeys.add(key);
+    this.regions.push({ q: region.q, r: region.r });
   }
 
   get(q: number, r: number): Tile | undefined {
@@ -120,6 +155,10 @@ export class World {
     let land = 0;
     let water = 0;
     let riverTiles = 0;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
 
     for (const tile of this.list) {
       counts[tile.terrain]++;
@@ -130,7 +169,28 @@ export class World {
         land++;
       }
       tile.coast = this.neighbors(tile).some((n) => n.terrain === Terrain.Water);
+      if (tile.x < minX) minX = tile.x;
+      if (tile.y < minY) minY = tile.y;
+      if (tile.x > maxX) maxX = tile.x;
+      if (tile.y > maxY) maxY = tile.y;
     }
+
+    if (!Number.isFinite(minX)) {
+      minX = 0;
+      maxX = 0;
+      minY = 0;
+      maxY = 0;
+    }
+    this.bounds = {
+      minX,
+      minY,
+      maxX,
+      maxY,
+      cx: (minX + maxX) / 2,
+      cy: (minY + maxY) / 2,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
 
     let largestTown = 0;
     let townBlobs = 0;

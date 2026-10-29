@@ -1,8 +1,10 @@
-import { HEX_SIZE, MAP_RADIUS, SEA_LEVEL } from '../config';
+import { HEX_SIZE, REGION_SPACING, SEA_LEVEL } from '../config';
 import {
+  axialRound,
   axialToPixel,
   clamp,
   clamp01,
+  HEX_DIRECTIONS,
   hexDistance,
   hexesInRange,
   smoothstep,
@@ -12,11 +14,12 @@ import { Perlin2D } from '../core/noise';
 import { Rng, hash2d } from '../core/rng';
 import { Terrain, isLand } from './terrain';
 import { createNamer, DEFAULT_NAME_CULTURE, type NameCulture } from './names';
-import { World, type MapBlob, type Tile } from './world';
+import { World, type MapBlob, type RegionCoord, type Tile } from './world';
 
 export interface MapGenOptions {
   seed: number;
-  radius?: number;
+  /** 已解锁的大区域，第一项应为初始区域 (0,0)。 */
+  regions?: RegionCoord[];
   /** 海拔偏移：正值更多陆地 / 山地，负值更多水域。 */
   elevationOffset?: number;
   /** 湿度偏移：正值更湿润，负值更干燥。 */
@@ -27,7 +30,13 @@ export interface MapGenOptions {
   rivers?: boolean;
 }
 
-const ORIGIN: Axial = { q: 0, r: 0 };
+interface NoiseFields {
+  elevation: Perlin2D;
+  moisture: Perlin2D;
+  econ: Perlin2D;
+  ridge: Perlin2D;
+  lake: Perlin2D;
+}
 
 /**
  * 地形分类参数。
@@ -40,126 +49,278 @@ const FARM_ECON_MOISTURE = 0.46;
 const FARM_ECON_MAX = 0.55;
 const SUBURB_MOISTURE = 0.47;
 
+/** 区域格的候选半径：覆盖一块大区域可能触及的所有地块。 */
+const REGION_CANDIDATE_RADIUS = Math.ceil(REGION_SPACING / Math.sqrt(3)) + 2;
+
+/** 每块新区域包含的城镇 / 工业区数量，与初始地图同一量级。 */
+const REGION_TOWNS = 8;
+const REGION_INDUSTRIES = 7;
+const REGION_RIVERS = 4;
+
+export interface RegionGenOptions {
+  elevationOffset?: number;
+  moistureOffset?: number;
+  culture?: NameCulture;
+  rivers?: boolean;
+}
+
 /**
  * 三层地图生成管线：
  *
  *   1. 宏观噪声：海拔 / 湿度 / 经济带 → 初始地块
  *   2. 连片修正：种子膨胀，城镇 8~20 格、工业 3~8 格，再做郊区晕染
  *   3. 局部细化：海岸线平滑 + 顺坡河流雕刻
+ *
+ * 整张地图由若干“大区域”拼成：初始地图是 (0,0) 区域，
+ * 开拓时选择方向，在相邻的大区域格中继续生成。
  */
 export function generateWorld(options: MapGenOptions): World {
   const seed = options.seed >>> 0;
-  const radius = options.radius ?? MAP_RADIUS;
+  const world = new World(seed);
+  const regions = normalizeRegions(options.regions);
+  for (const region of regions) {
+    addRegion(world, region, options);
+  }
+  return world;
+}
+
+/** 世界坐标中的区域归属：把地图划分成互不重叠的大六边形区域。 */
+export function regionOfTile(q: number, r: number): RegionCoord {
+  return axialRound(q / REGION_SPACING, r / REGION_SPACING);
+}
+
+/** 区域中心的世界轴向坐标。 */
+export function regionCenter(region: RegionCoord): Axial {
+  return { q: region.q * REGION_SPACING, r: region.r * REGION_SPACING };
+}
+
+/** 区域中心的世界像素坐标。 */
+export function regionCenterPixel(region: RegionCoord): { x: number; y: number } {
+  return axialToPixel(regionCenter(region), HEX_SIZE);
+}
+
+/**
+ * 在指定方向选择一个与现有版图相邻的空区域。
+ * 优先填补靠近版图中心的空位，避免地图长成细长的尖刺。
+ */
+export function frontierRegionFor(world: World, direction: number): RegionCoord | null {
+  const step = HEX_DIRECTIONS[((direction % 6) + 6) % 6];
+  if (!step) return null;
+
+  let sumX = 0;
+  let sumY = 0;
+  for (const region of world.regions) {
+    const center = axialToPixel(regionCenter(region), 1);
+    sumX += center.x;
+    sumY += center.y;
+  }
+  const count = Math.max(1, world.regions.length);
+  const cx = sumX / count;
+  const cy = sumY / count;
+
+  let best: RegionCoord | null = null;
+  let bestScore = Infinity;
+  for (const region of world.regions) {
+    const next = { q: region.q + step.q, r: region.r + step.r };
+    if (world.regionKeys.has(`${next.q},${next.r}`)) continue;
+    const center = axialToPixel(regionCenter(next), 1);
+    const dx = center.x - cx;
+    const dy = center.y - cy;
+    const score = dx * dx + dy * dy;
+    if (score < bestScore) {
+      bestScore = score;
+      best = next;
+    }
+  }
+  return best;
+}
+
+/** 在指定大区域中生成地形；已存在的区域会被跳过。 */
+export function addRegion(
+  world: World,
+  region: RegionCoord,
+  options: RegionGenOptions = {},
+): boolean {
+  if (world.regionKeys.has(`${region.q},${region.r}`)) return false;
+
   const elevationOffset = options.elevationOffset ?? 0;
   const moistureOffset = options.moistureOffset ?? 0;
   const culture = options.culture ?? DEFAULT_NAME_CULTURE;
-  const world = new World(seed, radius);
-  const rng = new Rng(seed);
-
-  const elevNoise = new Perlin2D(rng);
-  const moistNoise = new Perlin2D(rng);
-  const econNoise = new Perlin2D(rng);
-  const ridgeNoise = new Perlin2D(rng);
-
-  buildMacro(
-    world,
-    radius,
-    elevNoise,
-    moistNoise,
-    econNoise,
-    ridgeNoise,
-    elevationOffset,
-    moistureOffset,
+  const fields = createNoiseFields(world.seed);
+  const regionIndex = world.regions.length;
+  const rng = new Rng(
+    (world.seed ^
+      Math.imul(region.q, 0x9e3779b1) ^
+      Math.imul(region.r, 0x85ebca6b) ^
+      0x7f4a7c15) >>>
+      0,
   );
-  smoothCoastline(world, rng);
-  growTowns(world, radius, rng);
-  growIndustry(world, radius, rng);
-  paintSuburbHalo(world, rng, 3);
-  if (options.rivers !== false) carveRivers(world, rng, 3);
 
-  // 团块名称使用独立的随机流，避免改名字影响地图几何
-  const namer = createNamer(culture, new Rng(seed ^ 0x51ed270b));
-  for (const blob of world.blobs) blob.name = namer(blob.kind);
+  world.addRegion(region);
+  const center = regionCenter(region);
+  const firstTile = world.list.length;
+  const firstBlob = world.blobs.length;
 
-  world.refresh();
-
-  // 少量视觉抖动在生成后统一写入，保证刷新地图时纹理稳定
-  for (const tile of world.list) {
-    tile.jitter = hash2d(tile.q, tile.r, seed);
+  // 只生成归属该区域的地块；相邻区域的边界由区域六边形自然衔接
+  for (const a of hexesInRange(center, REGION_CANDIDATE_RADIUS)) {
+    const owner = regionOfTile(a.q, a.r);
+    if (owner.q !== region.q || owner.r !== region.r) continue;
+    if (world.has(a.q, a.r)) continue;
+    world.addTile(createMacroTile(a, fields, elevationOffset, moistureOffset));
   }
 
-  return world;
+  const newTiles = world.list.slice(firstTile);
+  if (newTiles.length === 0) {
+    world.refresh();
+    return false;
+  }
+  const allowed = new Set(newTiles.map((tile) => `${tile.q},${tile.r}`));
+
+  smoothCoastline(world, rng, newTiles);
+  growTowns(world, REGION_SPACING, rng, {
+    candidates: newTiles,
+    allowed,
+    desired: REGION_TOWNS,
+    minSpacing: 5,
+  });
+  growIndustry(world, REGION_SPACING, rng, {
+    candidates: newTiles,
+    allowed,
+    desired: REGION_INDUSTRIES,
+    minSpacing: 4,
+  });
+  paintSuburbHalo(world, rng, 3, allowed);
+  if (options.rivers !== false) carveRivers(world, rng, REGION_RIVERS, allowed);
+
+  nameBlobs(world, culture, world.seed, regionIndex, firstBlob);
+  applyJitter(world, newTiles);
+  world.refresh();
+  return true;
+}
+
+function normalizeRegions(regions: RegionCoord[] | undefined): RegionCoord[] {
+  const list: RegionCoord[] = [];
+  const seen = new Set<string>();
+  const push = (region: RegionCoord | undefined): void => {
+    if (!region || !Number.isFinite(region.q) || !Number.isFinite(region.r)) return;
+    const q = Math.round(region.q);
+    const r = Math.round(region.r);
+    const key = `${q},${r}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    list.push({ q, r });
+  };
+  if (regions && regions.length > 0) {
+    for (const region of regions) push(region);
+  }
+  if (!seen.has('0,0')) list.unshift({ q: 0, r: 0 });
+  return list;
+}
+
+function createNoiseFields(seed: number): NoiseFields {
+  const rng = new Rng(seed);
+  return {
+    elevation: new Perlin2D(rng),
+    moisture: new Perlin2D(rng),
+    econ: new Perlin2D(rng),
+    ridge: new Perlin2D(rng),
+    // 湖泊使用独立随机流，不影响原有城镇 / 工业的随机序列
+    lake: new Perlin2D(new Rng((seed ^ 0x27d4eb2d) >>> 0)),
+  };
+}
+
+function applyJitter(world: World, tiles: Tile[]): void {
+  for (const tile of tiles) {
+    tile.jitter = hash2d(tile.q, tile.r, world.seed);
+  }
+}
+
+function nameBlobs(
+  world: World,
+  culture: NameCulture,
+  seed: number,
+  regionIndex: number,
+  fromIndex: number,
+): void {
+  const taken = world.blobs.slice(0, fromIndex).map((blob) => blob.name);
+  const rng = new Rng(
+    (seed ^ 0x51ed270b ^ Math.imul(regionIndex, 0x9e3779b1)) >>> 0,
+  );
+  const namer = createNamer(culture, rng, taken);
+  for (let i = fromIndex; i < world.blobs.length; i++) {
+    const blob = world.blobs[i];
+    if (blob) blob.name = namer(blob.kind);
+  }
 }
 
 /* ------------------------------------------------------------------ */
 /* 第一层：宏观噪声                                                     */
 /* ------------------------------------------------------------------ */
 
-function buildMacro(
-  world: World,
-  radius: number,
-  elevNoise: Perlin2D,
-  moistNoise: Perlin2D,
-  econNoise: Perlin2D,
-  ridgeNoise: Perlin2D,
+function createMacroTile(
+  a: Axial,
+  fields: NoiseFields,
   elevationOffset: number,
   moistureOffset: number,
-): void {
-  for (const a of hexesInRange(ORIGIN, radius)) {
-    const nx = a.q + a.r * 0.5;
-    const ny = a.r * 0.866;
-    const dist = hexDistance(a, ORIGIN);
-    const edge = smoothstep(radius * 0.78, radius * 1.06, dist);
+): Tile {
+  const nx = a.q + a.r * 0.5;
+  const ny = a.r * 0.866;
 
-    const base = elevNoise.fbm(nx * 0.12 + 11.3, ny * 0.12 + 7.7, 5);
-    const ridge = ridgeNoise.ridged(nx * 0.18 + 3.1, ny * 0.18 + 9.4, 4);
-    const elevation = clamp01(
-      base * 0.8 + 0.08 - edge * 0.72 + (ridge - 0.5) * 0.17 + elevationOffset,
-    );
-    const moisture = clamp01(
-      moistNoise.fbm(nx * 0.09 + 40.2, ny * 0.09 + 13.8, 4) * 0.88 + 0.04 + moistureOffset,
-    );
-    const econ = clamp01(econNoise.fbm(nx * 0.06 + 70.5, ny * 0.06 + 31.4, 3) * 0.96 + 0.02);
+  const base = fields.elevation.fbm(nx * 0.12 + 11.3, ny * 0.12 + 7.7, 5);
+  const ridge = fields.ridge.ridged(nx * 0.18 + 3.1, ny * 0.18 + 9.4, 4);
+  // 大湖：低频湖泊噪声在地势较低处形成大片水面，取代原来的海洋边界
+  const lakeNoise = fields.lake.fbm(nx * 0.045 + 61.7, ny * 0.045 + 19.3, 3);
+  const lakeBasin = smoothstep(0.62, 0.82, lakeNoise);
+  const elevation = clamp01(
+    base * 0.8 + 0.1 + (ridge - 0.5) * 0.17 + elevationOffset - lakeBasin * 0.42,
+  );
+  const moisture = clamp01(
+    fields.moisture.fbm(nx * 0.09 + 40.2, ny * 0.09 + 13.8, 4) * 0.88 +
+      0.04 +
+      moistureOffset,
+  );
+  const econ = clamp01(
+    fields.econ.fbm(nx * 0.06 + 70.5, ny * 0.06 + 31.4, 3) * 0.96 + 0.02,
+  );
 
-    let terrain: Terrain;
-    if (elevation < SEA_LEVEL) {
-      terrain = Terrain.Water;
-    } else if (elevation > 0.69) {
-      terrain = Terrain.Mountain;
-    } else if (econ > 0.6 && moisture < 0.58 && elevation < 0.66) {
-      terrain = Terrain.Industry;
-    } else if (isFarmlandCandidate(elevation, moisture, econ)) {
-      terrain = Terrain.Farmland;
-    } else if (moisture > SUBURB_MOISTURE) {
-      terrain = Terrain.Suburb;
-    } else {
-      terrain = Terrain.Wasteland;
-    }
-
-    const pixel = axialToPixel(a, HEX_SIZE);
-    world.addTile({
-      q: a.q,
-      r: a.r,
-      terrain,
-      elevation,
-      moisture,
-      econ,
-      blobId: null,
-      river: false,
-      servedBy: [],
-      coast: false,
-      jitter: 0,
-      x: pixel.x,
-      y: pixel.y,
-    });
+  let terrain: Terrain;
+  if (elevation < SEA_LEVEL) {
+    terrain = Terrain.Water;
+  } else if (elevation > 0.69) {
+    terrain = Terrain.Mountain;
+  } else if (econ > 0.6 && moisture < 0.58 && elevation < 0.66) {
+    terrain = Terrain.Industry;
+  } else if (isFarmlandCandidate(elevation, moisture, econ)) {
+    terrain = Terrain.Farmland;
+  } else if (moisture > SUBURB_MOISTURE) {
+    terrain = Terrain.Suburb;
+  } else {
+    terrain = Terrain.Wasteland;
   }
+
+  const pixel = axialToPixel(a, HEX_SIZE);
+  return {
+    q: a.q,
+    r: a.r,
+    terrain,
+    elevation,
+    moisture,
+    econ,
+    blobId: null,
+    river: false,
+    servedBy: [],
+    coast: false,
+    jitter: 0,
+    x: pixel.x,
+    y: pixel.y,
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /* 第三层（先做）：海岸线平滑，避免单格噪点                              */
 /* ------------------------------------------------------------------ */
 
-function smoothCoastline(world: World, rng: Rng): void {
+function smoothCoastline(world: World, rng: Rng, tiles: Tile[]): void {
   const waterKeys = new Set<string>();
   for (const t of world.list) {
     if (t.terrain === Terrain.Water) waterKeys.add(`${t.q},${t.r}`);
@@ -167,11 +328,10 @@ function smoothCoastline(world: World, rng: Rng): void {
 
   const conversions: { tile: Tile; toWater: boolean }[] = [];
 
-  for (const tile of world.list) {
+  for (const tile of tiles) {
     const ns = world.neighbors(tile);
-    const outside = 6 - ns.length;
-    const waterNeighbors = ns.filter((n) => waterKeys.has(`${n.q},${n.r}`)).length + outside;
-    if (tile.terrain === Terrain.Water && waterNeighbors <= 1 && outside === 0) {
+    const waterNeighbors = ns.filter((n) => waterKeys.has(`${n.q},${n.r}`)).length;
+    if (tile.terrain === Terrain.Water && waterNeighbors <= 1) {
       conversions.push({ tile, toWater: false });
     } else if (isLand(tile.terrain) && tile.terrain !== Terrain.Mountain && waterNeighbors >= 5) {
       conversions.push({ tile, toWater: true });
@@ -191,8 +351,18 @@ function smoothCoastline(world: World, rng: Rng): void {
 /* 第二层：连片修正                                                     */
 /* ------------------------------------------------------------------ */
 
-function growTowns(world: World, radius: number, rng: Rng): void {
-  const candidates = world.list.filter(
+interface GrowOptions {
+  /** 参与选点的地块；默认整张地图。开拓时只允许新区域。 */
+  candidates?: Tile[];
+  /** 团块允许扩张到的地块键；默认不限制。 */
+  allowed?: Set<string>;
+  desired?: number;
+  minSpacing?: number;
+}
+
+function growTowns(world: World, radius: number, rng: Rng, options: GrowOptions = {}): void {
+  const pool = options.candidates ?? world.list;
+  const candidates = pool.filter(
     (t) =>
       isLand(t.terrain) &&
       t.terrain !== Terrain.Mountain &&
@@ -202,8 +372,8 @@ function growTowns(world: World, radius: number, rng: Rng): void {
   );
   if (candidates.length === 0) return;
 
-  const desired = clamp(Math.round(radius * 0.4), 4, 10);
-  const minSpacing = Math.max(5, radius * 0.27);
+  const desired = options.desired ?? clamp(Math.round(radius * 0.4), 4, 10);
+  const minSpacing = options.minSpacing ?? Math.max(5, radius * 0.27);
   const seeds: Tile[] = [];
 
   for (let attempt = 0; attempt < 900 && seeds.length < desired; attempt++) {
@@ -213,6 +383,7 @@ function growTowns(world: World, radius: number, rng: Rng): void {
       const cand = rng.pick(candidates);
       if (cand.blobId !== null) continue;
       if (seeds.some((s) => hexDistance(s, cand) < minSpacing)) continue;
+      if (world.blobs.some((blob) => hexDistance(blob.center, cand) < minSpacing)) continue;
       const coastal = world.neighbors(cand).some((n) => n.terrain === Terrain.Water) ? 0.16 : 0;
       const score =
         cand.econ * 0.55 +
@@ -227,22 +398,22 @@ function growTowns(world: World, radius: number, rng: Rng): void {
     if (best) seeds.push(best);
   }
 
-  if (seeds.length === 0) {
-    // 极端情况下退化为随机播种，保证地图上一定有城镇
+  if (seeds.length === 0 && world.blobs.length === 0) {
+    // 极端情况下退化为随机播种，保证初始地图上一定有城镇
     seeds.push(rng.pick(candidates));
   }
 
   for (const seed of seeds) {
     const targetSize = rng.intBetween(8, 20);
-    const tiles = growBlob(world, seed, targetSize, 'town', rng);
+    const tiles = growBlob(world, seed, targetSize, 'town', rng, options.allowed);
     for (const t of tiles) t.terrain = Terrain.Town;
     world.addBlob('town', tiles);
   }
 }
 
-function growIndustry(world: World, radius: number, rng: Rng): void {
-  const desired = clamp(Math.round(radius * 0.35), 3, 8);
-  const minSpacing = Math.max(4, radius * 0.2);
+function growIndustry(world: World, radius: number, rng: Rng, options: GrowOptions = {}): void {
+  const desired = options.desired ?? clamp(Math.round(radius * 0.35), 3, 8);
+  const minSpacing = options.minSpacing ?? Math.max(4, radius * 0.2);
 
   const isTownAdjacent = (tile: Tile): boolean => {
     if (tile.blobId !== null) return true;
@@ -253,7 +424,8 @@ function growIndustry(world: World, radius: number, rng: Rng): void {
     return false;
   };
 
-  const preferred = world.list.filter(
+  const pool = options.candidates ?? world.list;
+  const preferred = pool.filter(
     (t) =>
       isLand(t.terrain) &&
       t.terrain !== Terrain.Mountain &&
@@ -271,6 +443,7 @@ function growIndustry(world: World, radius: number, rng: Rng): void {
       const cand = rng.pick(preferred);
       if (cand.blobId !== null || isTownAdjacent(cand)) continue;
       if (seeds.some((s) => hexDistance(s, cand) < minSpacing)) continue;
+      if (world.blobs.some((blob) => hexDistance(blob.center, cand) < minSpacing)) continue;
       const score = cand.econ * 0.7 + rng.next() * 0.3;
       if (score > bestScore) {
         bestScore = score;
@@ -282,13 +455,13 @@ function growIndustry(world: World, radius: number, rng: Rng): void {
 
   for (const seed of seeds) {
     const targetSize = rng.intBetween(3, 8);
-    const tiles = growBlob(world, seed, targetSize, 'industry', rng);
+    const tiles = growBlob(world, seed, targetSize, 'industry', rng, options.allowed);
     for (const t of tiles) t.terrain = Terrain.Industry;
     world.addBlob('industry', tiles);
   }
 
   // 没有被团块吸收的宏观工业地块回退为郊区/荒地，保证“工业连片”语义
-  for (const tile of world.list) {
+  for (const tile of pool) {
     if (tile.terrain !== Terrain.Industry || tile.blobId !== null) continue;
     const nearTown = world.neighbors(tile).some((n) => {
       const blob = n.blobId === null ? undefined : world.blobById.get(n.blobId);
@@ -309,6 +482,7 @@ function growBlob(
   targetSize: number,
   kind: 'town' | 'industry',
   rng: Rng,
+  allowed?: Set<string>,
 ): Tile[] {
   const chosen: Tile[] = [seed];
   const inBlob = new Set<string>([`${seed.q},${seed.r}`]);
@@ -318,6 +492,7 @@ function growBlob(
     for (const tile of chosen) {
       for (const n of world.neighbors(tile)) {
         const key = `${n.q},${n.r}`;
+        if (allowed && !allowed.has(key)) continue;
         if (inBlob.has(key) || n.blobId !== null) continue;
         if (!isLand(n.terrain) || n.terrain === Terrain.Mountain) continue;
         frontier.set(key, n);
@@ -357,7 +532,12 @@ function growBlob(
 }
 
 /** 向城镇外围晕染郊区与农田，让“连片”在视觉上自然过渡。 */
-function paintSuburbHalo(world: World, rng: Rng, maxDistance: number): void {
+function paintSuburbHalo(
+  world: World,
+  rng: Rng,
+  maxDistance: number,
+  allowed?: Set<string>,
+): void {
   const townTiles = world.list.filter((t) => t.terrain === Terrain.Town);
   if (townTiles.length === 0) return;
 
@@ -384,6 +564,7 @@ function paintSuburbHalo(world: World, rng: Rng, maxDistance: number): void {
 
   for (const [key, d] of distance) {
     if (d === 0) continue;
+    if (allowed && !allowed.has(key)) continue;
     const tile = world.tiles.get(key);
     if (!tile || tile.blobId !== null || !isLand(tile.terrain) || tile.terrain === Terrain.Mountain) {
       continue;
@@ -402,25 +583,33 @@ function paintSuburbHalo(world: World, rng: Rng, maxDistance: number): void {
 /* 第三层：河流细节                                                     */
 /* ------------------------------------------------------------------ */
 
-/** 从海岸向高处逆流而上，保证每条河都能从山地汇入海洋。 */
-function carveRivers(world: World, rng: Rng, count: number): void {
+/** 从湖泊边缘向高处逆流而上，形成较长的内陆河流。 */
+function carveRivers(
+  world: World,
+  rng: Rng,
+  count: number,
+  allowed?: Set<string>,
+): void {
   const mouths = world.list.filter(
     (t) =>
       t.terrain === Terrain.Water &&
       !t.river &&
-      world.neighbors(t).some((n) => isLand(n.terrain) && n.blobId === null),
+      world.neighbors(t).some((n) => {
+        if (allowed && !allowed.has(`${n.q},${n.r}`)) return false;
+        return isLand(n.terrain) && n.blobId === null;
+      }),
   );
   if (mouths.length === 0) return;
 
   const usedMouths: Tile[] = [];
   let carved = 0;
 
-  for (let attempt = 0; attempt < count * 30 && carved < count; attempt++) {
+  for (let attempt = 0; attempt < count * 40 && carved < count; attempt++) {
     const mouth = rng.pick(mouths);
-    if (usedMouths.some((m) => hexDistance(m, mouth) < 6)) continue;
+    if (usedMouths.some((m) => hexDistance(m, mouth) < 7)) continue;
 
-    const path = traceRiverInland(world, mouth, rng);
-    if (!path || path.length < 8) continue;
+    const path = traceRiverInland(world, mouth, rng, allowed);
+    if (!path || path.length < 12) continue;
 
     for (const tile of path) {
       if (tile.blobId !== null) continue;
@@ -435,29 +624,40 @@ function carveRivers(world: World, rng: Rng, count: number): void {
   }
 }
 
-/** 从入海口出发，沿地势向上游走，返回从内陆到海口的路径。 */
-function traceRiverInland(world: World, mouth: Tile, rng: Rng): Tile[] | null {
+/** 从湖泊入水口出发，沿地势向上游走，返回从内陆到湖泊的路径。 */
+function traceRiverInland(
+  world: World,
+  mouth: Tile,
+  rng: Rng,
+  allowed?: Set<string>,
+): Tile[] | null {
   const firstStep = world
     .neighbors(mouth)
-    .filter((n) => isLand(n.terrain) && n.blobId === null)
-    .sort((a, b) => b.elevation - a.elevation)[0];
+    .filter((n) => {
+      if (allowed && !allowed.has(`${n.q},${n.r}`)) return false;
+      return isLand(n.terrain) && n.blobId === null;
+    })
+    .sort((a, b) => a.elevation - b.elevation)[0];
   if (!firstStep) return null;
 
   const path: Tile[] = [firstStep];
   const visited = new Set<string>([`${firstStep.q},${firstStep.r}`, `${mouth.q},${mouth.r}`]);
   let current = firstStep;
 
-  for (let step = 0; step < 26; step++) {
-    if (current.elevation > 0.6 && path.length >= 10) break;
+  for (let step = 0; step < 55; step++) {
+    if (current.elevation > 0.65 && path.length >= 12) break;
 
     let next: Tile | null = null;
     let bestScore = -Infinity;
     for (const n of world.neighbors(current)) {
       const key = `${n.q},${n.r}`;
       if (visited.has(key)) continue;
+      if (allowed && !allowed.has(key)) continue;
       if (!isLand(n.terrain) || n.blobId !== null) continue;
-      if (n.elevation < current.elevation - 0.015) continue; // 只向上游走
-      const score = n.elevation + rng.next() * 0.05;
+      // 允许轻微下坡穿越鞍部，让河流能绕过局部小高地继续延伸
+      if (n.elevation < current.elevation - 0.05) continue;
+      const downhill = Math.max(0, current.elevation - n.elevation);
+      const score = n.elevation - downhill * 2 + rng.next() * 0.05;
       if (score > bestScore) {
         bestScore = score;
         next = n;
@@ -469,7 +669,7 @@ function traceRiverInland(world: World, mouth: Tile, rng: Rng): Tile[] | null {
     current = next;
   }
 
-  return path.length >= 8 ? path : null;
+  return path.length >= 12 ? path : null;
 }
 
 /* ------------------------------------------------------------------ */

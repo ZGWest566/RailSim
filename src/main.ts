@@ -1,11 +1,11 @@
 import Phaser from 'phaser';
 import './style.css';
-import { MAP_RADIUS, MAP_SIZE_PRESETS, mapSizeForRadius, type MapSize } from './config';
 import { bus, type BuildTool } from './core/emitter';
 import { hashSeed } from './core/rng';
-import { hexKey } from './core/hex';
-import type { Tile, World } from './game/world';
-import { describeWorld, generateWorld } from './game/mapgen';
+import { DIRECTION_NAMES, hexKey } from './core/hex';
+import type { RegionCoord, Tile, World } from './game/world';
+import { addRegion, describeWorld, frontierRegionFor, generateWorld } from './game/mapgen';
+import { expansionCost } from './game/economy';
 import { DEFAULT_NAME_CULTURE, isNameCulture, type NameCulture } from './game/names';
 import { RailNetwork, type BuildResult } from './game/network';
 import { RailOperations, type LineSavePayload } from './game/operations';
@@ -38,26 +38,27 @@ class RailSimApp {
   private simSpeed = 1;
   private restored = false;
   private saveTimer: number | null = null;
-  private mapSize: MapSize = 'small';
   private mapCulture: NameCulture = DEFAULT_NAME_CULTURE;
   private elevationOffset = 0;
   private moistureOffset = 0;
   private startScreenOpen = false;
 
+  /** 已开拓区域数量（不含初始地图）。 */
+  private get expansions(): number {
+    return Math.max(0, this.world.regions.length - 1);
+  }
+
   constructor(fallbackSeed: number) {
     const saved = loadSave();
     const seed = saved && Number.isFinite(saved.seed) ? saved.seed : fallbackSeed;
     const savedMap = saved?.map;
-    this.mapSize = mapSizeForRadius(
-      typeof savedMap?.radius === 'number' ? savedMap.radius : MAP_RADIUS,
-    );
     this.mapCulture = isNameCulture(savedMap?.culture)
       ? savedMap.culture
       : DEFAULT_NAME_CULTURE;
     this.elevationOffset = clampMapOffset(savedMap?.elevationOffset);
     this.moistureOffset = clampMapOffset(savedMap?.moistureOffset);
 
-    this.world = generateWorld(this.worldOptions(seed));
+    this.world = generateWorld(this.worldOptions(seed, savedMap?.regions));
     this.network = new RailNetwork(this.world);
     this.operations = new RailOperations(this.world, this.network);
 
@@ -90,6 +91,7 @@ class RailSimApp {
         this.scene()?.setSimSpeed(speed);
       },
       tileInfo: (tile) => this.network.tileInfo(tile, this.activeStationType),
+      stationNetworkBonus: (stationId) => this.operations.networkBonusForStation(stationId),
       buildTrack: (tile) => this.applyResult(this.network.buildTrack(tile), tile),
       buildStation: (tile) =>
         this.applyResult(this.network.buildStation(tile, this.activeStationType), tile),
@@ -107,6 +109,13 @@ class RailSimApp {
       unassignTrain: (trainId) => this.unassignTrain(trainId),
       startNewGame: (settings) => this.startNewGame(settings),
       continueGame: () => this.continueFromStart(),
+      expansionInfo: () => ({
+        expansions: this.expansions,
+        regions: this.world.regions.length,
+        tiles: this.world.stats.total,
+        cost: expansionCost(this.expansions),
+      }),
+      expandRegion: (direction) => this.expandRegion(direction),
     });
 
     this.hud.setNetworkStats(this.network.stats);
@@ -195,7 +204,6 @@ class RailSimApp {
     this.startScreenOpen = true;
     this.hud.openStartScreen({
       seedText: String(seed),
-      size: this.mapSize,
       culture: this.mapCulture,
       elevationOffset: this.elevationOffset,
       moistureOffset: this.moistureOffset,
@@ -226,7 +234,7 @@ class RailSimApp {
         savedAt: Date.now(),
         seed: this.world.seed,
         map: {
-          radius: MAP_SIZE_PRESETS[this.mapSize].radius,
+          regions: this.world.regions.map((region) => ({ q: region.q, r: region.r })),
           elevationOffset: this.elevationOffset,
           moistureOffset: this.moistureOffset,
           culture: this.mapCulture,
@@ -240,10 +248,10 @@ class RailSimApp {
     }
   }
 
-  private worldOptions(seed: number) {
+  private worldOptions(seed: number, regions?: RegionCoord[]) {
     return {
       seed,
-      radius: MAP_SIZE_PRESETS[this.mapSize].radius,
+      regions: regions ?? [{ q: 0, r: 0 }],
       elevationOffset: this.elevationOffset,
       moistureOffset: this.moistureOffset,
       culture: this.mapCulture,
@@ -432,7 +440,6 @@ class RailSimApp {
 
   private startNewGame(settings: StartSettings): void {
     const seed = parseSeed(settings.seedText) ?? randomSeed();
-    this.mapSize = settings.size;
     this.mapCulture = settings.culture;
     this.elevationOffset = clampMapOffset(settings.elevationOffset);
     this.moistureOffset = clampMapOffset(settings.moistureOffset);
@@ -448,6 +455,56 @@ class RailSimApp {
     this.simSpeed = 1;
     this.scene()?.setSimSpeed(1);
     if (this.restored) this.hud.toast('已继续上次存档');
+  }
+
+  /** 支付费用，在指定方向的相邻大区域中继续生成地形。 */
+  private expandRegion(direction: number): void {
+    const cost = expansionCost(this.expansions);
+    if (this.network.credits < cost) {
+      this.hud.toast(`资金不足：开拓需要 ${cost.toLocaleString('en-US')} 元`);
+      return;
+    }
+
+    const region = frontierRegionFor(this.world, direction);
+    if (!region) {
+      this.hud.toast('这个方向已经没有可开拓的位置了。');
+      return;
+    }
+
+    if (this.lineEditorActive) {
+      this.lineEditorActive = false;
+      this.scene()?.setLineEditor(false);
+      this.hud.closeLineEditor();
+    }
+
+    this.network.credits -= cost;
+    const added = addRegion(this.world, region, {
+      elevationOffset: this.elevationOffset,
+      moistureOffset: this.moistureOffset,
+      culture: this.mapCulture,
+    });
+    if (!added) {
+      this.network.credits += cost;
+      this.hud.toast('这个方向暂时无法继续开拓。');
+      return;
+    }
+    this.operations.refreshWorld();
+
+    const scene = this.scene();
+    if (scene) {
+      scene.expandRegion(region);
+    } else {
+      this.hud.bindWorld(this.world);
+      this.hud.setNetworkStats(this.network.stats);
+      this.hud.setRailView(this.operations.view());
+    }
+    this.hud.setClock(this.operations.clockView(), this.network.credits);
+    this.hud.refreshSelected();
+    const directionName = DIRECTION_NAMES[((direction % 6) + 6) % 6] ?? '外侧';
+    this.hud.toast(
+      `已开拓${directionName}侧新区域 · 共 ${this.world.regions.length} 块 · 下次开拓 ¥${expansionCost(this.expansions).toLocaleString('en-US')}`,
+    );
+    this.saveGame();
   }
 
   private regenerate(seedText: string): void {

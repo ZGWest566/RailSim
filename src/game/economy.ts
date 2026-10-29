@@ -4,6 +4,14 @@ import type { Tile } from './world';
 /** 初始资金。重生成地图会重置到这个数额。 */
 export const STARTING_CREDITS = 500_000;
 
+/** 第一次开拓新区域的费用；之后每次翻倍。 */
+export const EXPANSION_BASE_COST = 1_000_000;
+
+/** 已经开拓过 count 次后，下一次开拓的费用。 */
+export function expansionCost(count: number): number {
+  return EXPANSION_BASE_COST * 2 ** Math.max(0, Math.floor(count));
+}
+
 /** 单格轨道基础造价（再乘以地块成本系数）。 */
 export const TRACK_BASE_COST = 6_000;
 
