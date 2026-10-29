@@ -49,8 +49,12 @@ const FARM_ECON_MOISTURE = 0.46;
 const FARM_ECON_MAX = 0.55;
 const SUBURB_MOISTURE = 0.47;
 
-/** 区域格的候选半径：覆盖一块大区域可能触及的所有地块。 */
-const REGION_CANDIDATE_RADIUS = Math.ceil(REGION_SPACING / Math.sqrt(3)) + 2;
+/**
+ * 区域格的候选半径：覆盖一块大区域可能触及的所有地块。
+ * 区域六边形的顶点在六边形距离上最远约为 2/3 个区域间距，必须留足余量，
+ * 否则三个区域交界处的顶点格会被所有区域漏掉，形成空洞。
+ */
+const REGION_CANDIDATE_RADIUS = Math.ceil((REGION_SPACING * 2) / 3) + 3;
 
 /** 每块新区域包含的城镇 / 工业区数量，与初始地图同一量级。 */
 const REGION_TOWNS = 8;
@@ -84,9 +88,39 @@ export function generateWorld(options: MapGenOptions): World {
   return world;
 }
 
-/** 世界坐标中的区域归属：把地图划分成互不重叠的大六边形区域。 */
+/**
+ * 世界坐标中的区域归属：把地图划分成互不重叠的大六边形区域。
+ *
+ * 先按比例取近似区域，再在附近按实际像素距离找最近的区域中心。
+ * 不能只用轴向取整：在三个区域交界的顶点附近可能出现取整误差，
+ * 导致某一格既不属于任何已解锁区域，形成空洞。
+ */
 export function regionOfTile(q: number, r: number): RegionCoord {
-  return axialRound(q / REGION_SPACING, r / REGION_SPACING);
+  const approx = axialRound(q / REGION_SPACING, r / REGION_SPACING);
+  let best: RegionCoord = { q: approx.q, r: approx.r };
+  let bestDistance = Infinity;
+
+  // 近似点最多偏差一格，搜索两圈足以覆盖所有候选
+  for (let dq = -2; dq <= 2; dq++) {
+    for (let dr = -2; dr <= 2; dr++) {
+      const mq = approx.q + dq;
+      const mr = approx.r + dr;
+      const dx = q - mq * REGION_SPACING;
+      const dy = r - mr * REGION_SPACING;
+      // 像素距离² 与 dx² + dx·dy + dy² 成正比，省略常数因子
+      const distance = dx * dx + dx * dy + dy * dy;
+      if (
+        distance < bestDistance - 1e-9 ||
+        (Math.abs(distance - bestDistance) <= 1e-9 &&
+          (mq < best.q || (mq === best.q && mr < best.r)))
+      ) {
+        bestDistance = distance;
+        best = { q: mq, r: mr };
+      }
+    }
+  }
+
+  return best;
 }
 
 /** 区域中心的世界轴向坐标。 */
