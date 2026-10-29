@@ -17,7 +17,11 @@ import type { Truck } from '../game/cargo';
 import { STATION_DEFS, type StationDef, type StationType } from '../game/stations';
 import { TERRAIN_DEFS, Terrain } from '../game/terrain';
 import type { MapBlob, RegionCoord, Tile, World } from '../game/world';
-import { regionCenterPixel } from '../game/mapgen';
+import {
+  expansionCandidates,
+  regionCenterPixel,
+  regionOfTile,
+} from '../game/mapgen';
 
 interface PointerDownState {
   x: number;
@@ -64,9 +68,13 @@ export class MapScene extends Phaser.Scene {
   private trainGfx!: Phaser.GameObjects.Graphics;
   private truckGfx!: Phaser.GameObjects.Graphics;
   private unlockGfx!: Phaser.GameObjects.Graphics;
+  private expansionGfx!: Phaser.GameObjects.Graphics;
   private hoverGfx!: Phaser.GameObjects.Graphics;
   private selectGfx!: Phaser.GameObjects.Graphics;
   private unlockWave: { startedAt: number; cx: number; cy: number; size: number } | null = null;
+  private expansionActive = false;
+  private expansionRegions: RegionCoord[] = [];
+  private hoveredExpansion: RegionCoord | null = null;
 
   private readonly corners = hexCorners(HEX_SIZE);
   private labels: BlobLabel[] = [];
@@ -129,6 +137,7 @@ export class MapScene extends Phaser.Scene {
     this.stationGfx = this.add.graphics().setDepth(7);
     this.stationDotsGfx = this.add.graphics().setDepth(7.2);
     this.unlockGfx = this.add.graphics().setDepth(8.5);
+    this.expansionGfx = this.add.graphics().setDepth(8.6);
     this.hoverGfx = this.add.graphics().setDepth(9);
     this.selectGfx = this.add.graphics().setDepth(10);
 
@@ -173,6 +182,77 @@ export class MapScene extends Phaser.Scene {
       size: HEX_SIZE * REGION_SPACING,
     };
     this.emitZoom();
+  }
+
+  /** 进入 / 退出开拓选区：在现有区域周围显示黄色六边形。 */
+  setExpansionSelection(active: boolean): void {
+    if (this.expansionActive === active) {
+      if (active) this.fitToExpansion();
+      return;
+    }
+    this.expansionActive = active;
+    this.hoveredExpansion = null;
+    this.expansionRegions = active ? expansionCandidates(this.world) : [];
+    this.clearHoverInfo();
+    this.setHovered(null);
+    this.selected = null;
+    this.selectGfx.clear();
+    this.drawExpansionSelection();
+    this.updateCursor();
+    if (active) this.fitToExpansion();
+    else this.fitToMap();
+  }
+
+  private drawExpansionSelection(): void {
+    const g = this.expansionGfx;
+    g.clear();
+    if (!this.expansionActive) return;
+
+    const size = HEX_SIZE * REGION_SPACING;
+    const corners = hexCorners(size);
+    for (const region of this.expansionRegions) {
+      const center = regionCenterPixel(region);
+      const points = corners.map(
+        (p) => new Phaser.Math.Vector2(center.x + p.x, center.y + p.y),
+      );
+      const hovered =
+        this.hoveredExpansion?.q === region.q &&
+        this.hoveredExpansion?.r === region.r;
+      g.fillStyle(0xe9b968, hovered ? 0.16 : 0.05);
+      g.fillPoints(points, true);
+      g.lineStyle(hovered ? 4 : 2.2, 0xe9b968, hovered ? 1 : 0.62);
+      g.strokePoints(points, true);
+    }
+  }
+
+  private expansionRegionAt(screenX: number, screenY: number): RegionCoord | null {
+    if (!this.expansionActive) return null;
+    const point = this.cameras.main.getWorldPoint(screenX, screenY);
+    const tile = pixelToAxial(point.x, point.y, HEX_SIZE);
+    const region = regionOfTile(tile.q, tile.r);
+    return (
+      this.expansionRegions.find(
+        (item) => item.q === region.q && item.r === region.r,
+      ) ?? null
+    );
+  }
+
+  private fitToExpansion(): void {
+    const bounds = this.world.bounds;
+    const halfW = (SQRT3 * HEX_SIZE * REGION_SPACING) / 2;
+    const halfH = HEX_SIZE * REGION_SPACING;
+    let minX = bounds.minX;
+    let minY = bounds.minY;
+    let maxX = bounds.maxX;
+    let maxY = bounds.maxY;
+    for (const region of this.expansionRegions) {
+      const center = regionCenterPixel(region);
+      minX = Math.min(minX, center.x - halfW);
+      maxX = Math.max(maxX, center.x + halfW);
+      minY = Math.min(minY, center.y - halfH);
+      maxY = Math.max(maxY, center.y + halfH);
+    }
+    this.fitBounds(minX, minY, maxX, maxY, HEX_SIZE * 1.5);
   }
 
   /** 切换建造工具；App 是唯一的状态源。 */
@@ -367,7 +447,11 @@ export class MapScene extends Phaser.Scene {
     this.hoverGfx.clear();
     this.selectGfx.clear();
     this.unlockGfx.clear();
+    this.expansionGfx.clear();
     this.unlockWave = null;
+    this.expansionActive = false;
+    this.expansionRegions = [];
+    this.hoveredExpansion = null;
     this.routeGfx.clear();
     this.trainGfx.clear();
     this.truckGfx.clear();
@@ -1572,12 +1656,29 @@ export class MapScene extends Phaser.Scene {
   }
 
   fitToMap(): void {
+    const bounds = this.world.bounds;
+    this.fitBounds(
+      bounds.minX,
+      bounds.minY,
+      bounds.maxX,
+      bounds.maxY,
+      HEX_SIZE * 2,
+    );
+  }
+
+  private fitBounds(
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number,
+    padding: number,
+  ): void {
     const cam = this.cameras.main;
     const safe = this.safeArea();
-    const bounds = this.world.bounds;
-    const padding = HEX_SIZE * 2;
-    const mapW = Math.max(HEX_SIZE * 6, bounds.width + padding * 2);
-    const mapH = Math.max(HEX_SIZE * 6, bounds.height + padding * 2);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const mapW = Math.max(HEX_SIZE * 6, maxX - minX + padding * 2);
+    const mapH = Math.max(HEX_SIZE * 6, maxY - minY + padding * 2);
     const zoom = clamp(
       Math.min((safe.right - safe.left) / (mapW * 1.05), (safe.bottom - safe.top) / (mapH * 1.05)),
       CAMERA_MIN_ZOOM,
@@ -1585,7 +1686,7 @@ export class MapScene extends Phaser.Scene {
     );
 
     cam.setZoom(zoom);
-    cam.centerOn(bounds.cx, bounds.cy);
+    cam.centerOn(cx, cy);
     cam.scrollX += (this.scale.width / 2 - safe.cx) / zoom;
     cam.scrollY += (this.scale.height / 2 - safe.cy) / zoom;
 
@@ -1698,6 +1799,21 @@ export class MapScene extends Phaser.Scene {
         return;
       }
 
+      if (this.expansionActive) {
+        const region = this.expansionRegionAt(pointer.x, pointer.y);
+        const changed =
+          region?.q !== this.hoveredExpansion?.q ||
+          region?.r !== this.hoveredExpansion?.r;
+        if (changed) {
+          this.hoveredExpansion = region;
+          this.drawExpansionSelection();
+        }
+        this.hoverWorld = null;
+        this.setHovered(null);
+        this.updateCursor();
+        return;
+      }
+
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       this.hoverWorld = { x: worldPoint.x, y: worldPoint.y };
       this.setHovered(this.tileAtScreen(pointer.x, pointer.y));
@@ -1711,6 +1827,19 @@ export class MapScene extends Phaser.Scene {
       if (!state) return;
       this.pointerDown = null;
       const wasDrag = this.dragDistance > 4;
+
+      if (this.expansionActive) {
+        if (!wasDrag && state.button === 0) {
+          const region = this.expansionRegionAt(pointer.x, pointer.y);
+          if (region) {
+            this.hoveredExpansion = region;
+            this.drawExpansionSelection();
+            bus.emit('expand:pick', region);
+          }
+        }
+        this.updateCursor();
+        return;
+      }
 
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       this.hoverWorld = { x: worldPoint.x, y: worldPoint.y };
@@ -1749,6 +1878,11 @@ export class MapScene extends Phaser.Scene {
       this.hoverWorld = null;
       this.setHovered(null);
       this.clearHoverInfo();
+      if (this.expansionActive) {
+        this.hoveredExpansion = null;
+        this.drawExpansionSelection();
+        this.updateCursor();
+      }
     });
 
     this.updateCursor();
@@ -1810,6 +1944,10 @@ export class MapScene extends Phaser.Scene {
 
   private updateCursor(): void {
     if (this.pointerDown) return;
+    if (this.expansionActive) {
+      this.game.canvas.style.cursor = this.hoveredExpansion ? 'pointer' : 'grab';
+      return;
+    }
     this.game.canvas.style.cursor =
       this.lineEditorActive || this.activeTool !== 'inspect' ? 'crosshair' : 'grab';
   }

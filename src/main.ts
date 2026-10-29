@@ -2,9 +2,9 @@ import Phaser from 'phaser';
 import './style.css';
 import { bus, type BuildTool } from './core/emitter';
 import { hashSeed } from './core/rng';
-import { DIRECTION_NAMES, hexKey } from './core/hex';
+import { hexKey } from './core/hex';
 import type { RegionCoord, Tile, World } from './game/world';
-import { addRegion, describeWorld, frontierRegionFor, generateWorld } from './game/mapgen';
+import { addRegion, describeWorld, generateWorld } from './game/mapgen';
 import { expansionCost } from './game/economy';
 import { DEFAULT_NAME_CULTURE, isNameCulture, type NameCulture } from './game/names';
 import { RailNetwork, type BuildResult } from './game/network';
@@ -42,6 +42,9 @@ class RailSimApp {
   private elevationOffset = 0;
   private moistureOffset = 0;
   private startScreenOpen = false;
+  /** 地图上已选中、等待确认的开拓区域。 */
+  private pendingExpansion: RegionCoord | null = null;
+  private expansionSelecting = false;
 
   /** 已开拓区域数量（不含初始地图）。 */
   private get expansions(): number {
@@ -79,6 +82,7 @@ class RailSimApp {
       zoom: (factor) => this.scene()?.zoomBy(factor),
       fit: () => this.scene()?.fitToMap(),
       tool: (tool) => {
+        if (this.expansionSelecting) this.exitExpansionSelection();
         this.activeTool = tool;
         this.scene()?.setTool(tool, this.activeStationType);
       },
@@ -115,7 +119,10 @@ class RailSimApp {
         tiles: this.world.stats.total,
         cost: expansionCost(this.expansions),
       }),
-      expandRegion: (direction) => this.expandRegion(direction),
+      startExpansionSelection: () => this.startExpansionSelection(),
+      confirmExpansion: () => this.confirmExpansion(),
+      cancelExpansionPick: () => this.cancelExpansionPick(),
+      exitExpansionSelection: () => this.exitExpansionSelection(),
     });
 
     this.hud.setNetworkStats(this.network.stats);
@@ -144,6 +151,7 @@ class RailSimApp {
     bus.on('camera:zoom', (zoom) => this.hud.setZoom(zoom));
     bus.on('sim:tick', (view) => this.hud.setClock(view, this.network.credits));
     bus.on('map:tooltip', (tooltip) => this.hud.showMapTooltip(tooltip));
+    bus.on('expand:pick', (region) => this.pickExpansionRegion(region));
     bus.on('line:pick', (tile) => this.pickLineStation(tile));
     bus.on('map:action', ({ tile, tool, neighbor }) => {
       if (tool === 'track') {
@@ -457,24 +465,50 @@ class RailSimApp {
     if (this.restored) this.hud.toast('已继续上次存档');
   }
 
-  /** 支付费用，在指定方向的相邻大区域中继续生成地形。 */
-  private expandRegion(direction: number): void {
-    const cost = expansionCost(this.expansions);
-    if (this.network.credits < cost) {
-      this.hud.toast(`资金不足：开拓需要 ${cost.toLocaleString('en-US')} 元`);
-      return;
-    }
-
-    const region = frontierRegionFor(this.world, direction);
-    if (!region) {
-      this.hud.toast('这个方向已经没有可开拓的位置了。');
-      return;
-    }
-
+  /** 进入地图开拓选区，显示可开拓的黄色六边形。 */
+  private startExpansionSelection(): void {
     if (this.lineEditorActive) {
       this.lineEditorActive = false;
       this.scene()?.setLineEditor(false);
       this.hud.closeLineEditor();
+    }
+
+    this.pendingExpansion = null;
+    this.expansionSelecting = true;
+    this.scene()?.setExpansionSelection(true);
+    this.hud.setExpansionSelecting(true);
+    this.hud.toast('点击黄色六边形选择新区域');
+  }
+
+  /** 在地图上选中一块区域后，打开确认窗口。 */
+  private pickExpansionRegion(region: RegionCoord): void {
+    this.pendingExpansion = region;
+    this.hud.setExpansionSelecting(false);
+    this.hud.openExpandConfirm();
+  }
+
+  /** 关闭确认窗口，回到地图选区继续选择。 */
+  private cancelExpansionPick(): void {
+    this.pendingExpansion = null;
+    if (this.scene()) this.hud.setExpansionSelecting(true);
+  }
+
+  private exitExpansionSelection(): void {
+    this.pendingExpansion = null;
+    this.expansionSelecting = false;
+    this.scene()?.setExpansionSelection(false);
+    this.hud.setExpansionSelecting(false);
+  }
+
+  /** 确认开拓所选区域并扣除费用。 */
+  private confirmExpansion(): void {
+    const region = this.pendingExpansion;
+    if (!region) return;
+
+    const cost = expansionCost(this.expansions);
+    if (this.network.credits < cost) {
+      this.hud.toast(`资金不足：开拓需要 ${cost.toLocaleString('en-US')} 元`);
+      return;
     }
 
     this.network.credits -= cost;
@@ -485,24 +519,30 @@ class RailSimApp {
     });
     if (!added) {
       this.network.credits += cost;
-      this.hud.toast('这个方向暂时无法继续开拓。');
+      this.pendingExpansion = null;
+      this.hud.toast('这个位置暂时无法开拓。');
+      this.hud.setExpansionSelecting(true);
       return;
     }
+
+    this.pendingExpansion = null;
+    this.expansionSelecting = false;
     this.operations.refreshWorld();
 
     const scene = this.scene();
     if (scene) {
       scene.expandRegion(region);
+      scene.setExpansionSelection(false);
     } else {
       this.hud.bindWorld(this.world);
       this.hud.setNetworkStats(this.network.stats);
       this.hud.setRailView(this.operations.view());
     }
+    this.hud.setExpansionSelecting(false);
     this.hud.setClock(this.operations.clockView(), this.network.credits);
     this.hud.refreshSelected();
-    const directionName = DIRECTION_NAMES[((direction % 6) + 6) % 6] ?? '外侧';
     this.hud.toast(
-      `已开拓${directionName}侧新区域 · 共 ${this.world.regions.length} 块 · 下次开拓 ¥${expansionCost(this.expansions).toLocaleString('en-US')}`,
+      `新区域已开拓 · 共 ${this.world.regions.length} 块 · 下次开拓 ¥${expansionCost(this.expansions).toLocaleString('en-US')}`,
     );
     this.saveGame();
   }
@@ -519,6 +559,9 @@ class RailSimApp {
       this.scene()?.setLineEditor(false);
       this.hud.closeLineEditor();
     }
+    this.pendingExpansion = null;
+    this.expansionSelecting = false;
+    this.hud.setExpansionSelecting(false);
 
     this.world = generateWorld(this.worldOptions(seed));
     this.network = new RailNetwork(this.world);

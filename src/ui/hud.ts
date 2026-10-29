@@ -23,7 +23,7 @@ import { generateWorld } from '../game/mapgen';
 import { NAME_CULTURES, type NameCulture } from '../game/names';
 import { HEX_SIZE } from '../config';
 import { hashSeed } from '../core/rng';
-import { DIRECTION_NAMES, hexCorners } from '../core/hex';
+import { hexCorners } from '../core/hex';
 import type { Tile, World } from '../game/world';
 import type { BuildTool } from '../core/emitter';
 
@@ -72,7 +72,10 @@ export interface HudHandlers {
   startNewGame(settings: StartSettings): void;
   continueGame(): void;
   expansionInfo(): ExpansionInfo;
-  expandRegion(direction: number): void;
+  startExpansionSelection(): void;
+  confirmExpansion(): void;
+  cancelExpansionPick(): void;
+  exitExpansionSelection(): void;
 }
 
 export interface Hud {
@@ -93,6 +96,10 @@ export interface Hud {
   openStartScreen(defaults: StartScreenDefaults): void;
   openTutorial(): void;
   toast(message: string): void;
+  /** 打开选好区域后的开拓确认窗口。 */
+  openExpandConfirm(): void;
+  /** 显示 / 隐藏“点击黄色六边形”的地图提示。 */
+  setExpansionSelecting(active: boolean): void;
 }
 
 const TOOL_HINTS: Record<BuildTool, string> = {
@@ -196,8 +203,8 @@ export function createHud(handlers: HudHandlers): Hud {
   const expandTiles = el<HTMLElement>('expand-tiles');
   const expandCost = el<HTMLElement>('expand-cost');
   const expandMoney = el<HTMLElement>('expand-money');
-  const expandDirections = el<HTMLDivElement>('expand-directions');
   const expandHint = el<HTMLElement>('expand-hint');
+  const expandSelectHint = el<HTMLDivElement>('expand-select-hint');
 
   const tutorialButton = el<HTMLButtonElement>('tutorial-button');
   const tutorialModal = el<HTMLDivElement>('tutorial-modal');
@@ -239,7 +246,7 @@ export function createHud(handlers: HudHandlers): Hud {
   let opexToday = 0;
   let lastCredits = 500_000;
   let expandOpen = false;
-  let selectedDirection: number | null = null;
+  let expansionSelecting = false;
   /** 当前模拟速度与暂停前的速度，供空格键恢复。 */
   let currentSpeed = 1;
   let resumeSpeed = 1;
@@ -324,21 +331,6 @@ export function createHud(handlers: HudHandlers): Hud {
 
   /* ------------------------------ 开拓新区域 ------------------------------ */
 
-  const expandDirectionButtons: HTMLButtonElement[] = [];
-  for (let direction = 0; direction < 6; direction++) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'expand-direction';
-    button.dataset.direction = String(direction);
-    button.textContent = DIRECTION_NAMES[direction] ?? `方向 ${direction + 1}`;
-    button.addEventListener('click', () => {
-      selectedDirection = direction;
-      refreshExpandModal();
-    });
-    expandDirections.append(button);
-    expandDirectionButtons.push(button);
-  }
-
   function refreshExpandModal(): void {
     const info = handlers.expansionInfo();
     const enough = lastCredits >= info.cost;
@@ -346,22 +338,14 @@ export function createHud(handlers: HudHandlers): Hud {
     expandTiles.textContent = `${info.tiles.toLocaleString('en-US')} 格`;
     expandCost.textContent = formatMoney(info.cost);
     expandMoney.textContent = formatMoney(lastCredits);
-    for (const [index, button] of expandDirectionButtons.entries()) {
-      button.classList.toggle('is-active', index === selectedDirection);
-    }
-    expandConfirm.disabled = !enough || selectedDirection === null;
-    if (!enough) {
-      expandHint.textContent = `资金不足，还差 ${formatMoney(info.cost - lastCredits)}。`;
-    } else if (selectedDirection === null) {
-      expandHint.textContent = `第 ${info.expansions + 1} 次开拓，请选择方向。`;
-    } else {
-      expandHint.textContent = `将在${DIRECTION_NAMES[selectedDirection] ?? '外侧'}继续生成一块新区域，之后费用翻倍。`;
-    }
+    expandConfirm.disabled = !enough;
+    expandHint.textContent = enough
+      ? '确认开拓所选区域？开拓后可以立即在新区域铺轨建站，之后每次费用翻倍。'
+      : `资金不足，还差 ${formatMoney(info.cost - lastCredits)}。`;
   }
 
-  function openExpandModal(): void {
+  function openExpandConfirm(): void {
     expandOpen = true;
-    selectedDirection = null;
     refreshExpandModal();
     expandModal.classList.remove('hidden');
     expandCard.focus();
@@ -374,15 +358,30 @@ export function createHud(handlers: HudHandlers): Hud {
     expandButton.focus();
   }
 
-  expandButton.addEventListener('click', openExpandModal);
-  expandBackdrop.addEventListener('click', closeExpandModal);
-  expandClose.addEventListener('click', closeExpandModal);
-  expandCancel.addEventListener('click', closeExpandModal);
-  expandConfirm.addEventListener('click', () => {
-    if (selectedDirection === null) return;
-    const direction = selectedDirection;
+  function setExpansionSelecting(active: boolean): void {
+    expansionSelecting = active;
+    expandSelectHint.classList.toggle('hidden', !active);
+  }
+
+  expandButton.addEventListener('click', () => {
     closeExpandModal();
-    handlers.expandRegion(direction);
+    handlers.startExpansionSelection();
+  });
+  expandBackdrop.addEventListener('click', () => {
+    closeExpandModal();
+    handlers.cancelExpansionPick();
+  });
+  expandClose.addEventListener('click', () => {
+    closeExpandModal();
+    handlers.cancelExpansionPick();
+  });
+  expandCancel.addEventListener('click', () => {
+    closeExpandModal();
+    handlers.cancelExpansionPick();
+  });
+  expandConfirm.addEventListener('click', () => {
+    closeExpandModal();
+    handlers.confirmExpansion();
   });
 
   /* ------------------------------ 开始界面 ------------------------------ */
@@ -676,11 +675,18 @@ export function createHud(handlers: HudHandlers): Hud {
     if (key === 'escape') {
       if (tutorialOpen) closeTutorial();
       else if (garageOpen) closeGarage();
-      else if (lineDraft) handlers.cancelLineEditor();
+      else if (expandOpen) {
+        closeExpandModal();
+        handlers.cancelExpansionPick();
+      } else if (expansionSelecting) {
+        handlers.exitExpansionSelection();
+      } else if (lineDraft) {
+        handlers.cancelLineEditor();
+      }
       return;
     }
 
-    if (tutorialOpen) return;
+    if (tutorialOpen || expandOpen) return;
 
     if (event.code === 'Space' || key === ' ') {
       applySpeed(currentSpeed === 0 ? resumeSpeed : 0);
@@ -1805,6 +1811,8 @@ export function createHud(handlers: HudHandlers): Hud {
     openStartScreen,
     openTutorial,
     toast,
+    openExpandConfirm,
+    setExpansionSelecting,
   };
 }
 

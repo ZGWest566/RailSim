@@ -276,14 +276,12 @@
               <div><span>费用</span><strong id="expand-cost">¥ 1,000,000</strong></div>
               <div><span>当前资金</span><strong id="expand-money">¥ 500,000</strong></div>
             </div>
-            <p class="expand-direction-label">选择开拓方向</p>
-            <div class="expand-directions" id="expand-directions"></div>
-            <p class="expand-hint" id="expand-hint">第一次开拓需要 ¥1,000,000，之后每次翻倍。</p>
+            <p class="expand-hint" id="expand-hint">确认开拓所选区域？第一次需要 ¥1,000,000，之后每次翻倍。</p>
           </div>
 
           <div class="expand-actions">
             <button class="btn" id="expand-cancel">取消</button>
-            <button class="btn btn-primary" id="expand-confirm">开拓新区域</button>
+            <button class="btn btn-primary" id="expand-confirm">确认开拓</button>
           </div>
         </div>
       </div>
@@ -388,7 +386,7 @@
 
             <section class="tutorial-section">
               <h3>开拓新区域</h3>
-              <p>整张初始地图是一块大区域。顶栏「开拓」可以选择东 / 东北 / 西北 / 西 / 西南 / 东南方向，新增一块与现有版图衔接的区域。第一次需要 ¥1,000,000，之后每次翻倍；新区域会出现新的城镇、工业区、湖泊与河流，可以直接铺轨建站。</p>
+              <p>整张初始地图是一块大区域。点击顶栏「开拓」后，地图上的相邻空区域会显示黄色六边形框；点击要开拓的区域并确认，就会生成一块与现有版图衔接的新区域。第一次需要 ¥1,000,000，之后每次翻倍。新区域会出现新的城镇、工业区、湖泊与河流，可以直接铺轨建站；按 Esc 可退出选区。</p>
             </section>
 
             <section class="tutorial-section">
@@ -414,6 +412,10 @@
       </div>
 
       <div class="map-tooltip hidden" id="map-tooltip" role="tooltip" aria-live="polite"></div>
+
+      <div class="expand-select-hint hidden" id="expand-select-hint" role="status">
+        点击黄色六边形选择新区域 · Esc 取消
+      </div>
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
 

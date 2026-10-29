@@ -1516,40 +1516,26 @@ body.station-mode .toast {
   font-variant-numeric: tabular-nums;
 }
 
-.expand-direction-label {
-  margin: 14px 0 7px;
-  color: var(--muted-2);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-}
-
-.expand-directions {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
-}
-
-.expand-direction {
-  padding: 8px 6px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.025);
-  color: var(--muted);
-  font-size: 11.5px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
-}
-
-.expand-direction:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.expand-direction.is-active {
-  border-color: rgba(233, 185, 104, 0.65);
-  background: rgba(233, 185, 104, 0.1);
+.expand-select-hint {
+  position: absolute;
+  left: 50%;
+  top: 78px;
+  z-index: 56;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border: 1px solid rgba(233, 185, 104, 0.45);
+  border-radius: 8px;
+  background: rgba(18, 26, 32, 0.95);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.38);
   color: var(--gold);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.expand-select-hint.hidden {
+  display: none;
 }
 
 .expand-hint {

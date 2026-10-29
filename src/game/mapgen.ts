@@ -99,40 +99,20 @@ export function regionCenterPixel(region: RegionCoord): { x: number; y: number }
   return axialToPixel(regionCenter(region), HEX_SIZE);
 }
 
-/**
- * 在指定方向选择一个与现有版图相邻的空区域。
- * 优先填补靠近版图中心的空位，避免地图长成细长的尖刺。
- */
-export function frontierRegionFor(world: World, direction: number): RegionCoord | null {
-  const step = HEX_DIRECTIONS[((direction % 6) + 6) % 6];
-  if (!step) return null;
-
-  let sumX = 0;
-  let sumY = 0;
+/** 所有与现有版图相邻、尚未解锁的区域。 */
+export function expansionCandidates(world: World): RegionCoord[] {
+  const seen = new Set<string>();
+  const out: RegionCoord[] = [];
   for (const region of world.regions) {
-    const center = axialToPixel(regionCenter(region), 1);
-    sumX += center.x;
-    sumY += center.y;
-  }
-  const count = Math.max(1, world.regions.length);
-  const cx = sumX / count;
-  const cy = sumY / count;
-
-  let best: RegionCoord | null = null;
-  let bestScore = Infinity;
-  for (const region of world.regions) {
-    const next = { q: region.q + step.q, r: region.r + step.r };
-    if (world.regionKeys.has(`${next.q},${next.r}`)) continue;
-    const center = axialToPixel(regionCenter(next), 1);
-    const dx = center.x - cx;
-    const dy = center.y - cy;
-    const score = dx * dx + dy * dy;
-    if (score < bestScore) {
-      bestScore = score;
-      best = next;
+    for (const step of HEX_DIRECTIONS) {
+      const next = { q: region.q + step.q, r: region.r + step.r };
+      const key = `${next.q},${next.r}`;
+      if (world.regionKeys.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      out.push(next);
     }
   }
-  return best;
+  return out;
 }
 
 /** 在指定大区域中生成地形；已存在的区域会被跳过。 */

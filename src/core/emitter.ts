@@ -42,6 +42,8 @@ export interface AppEvents extends Record<string, unknown> {
   'tool:change': BuildTool;
   'sim:tick': import('../game/operations').ClockView;
   'map:tooltip': import('../game/operations').MapTooltip | null;
+  /** 在地图上选中一块待开拓区域。 */
+  'expand:pick': import('../game/world').RegionCoord;
 }
 
 export const bus = new Emitter<AppEvents>();
