@@ -5,8 +5,8 @@ import type { OperationsSave } from './operations';
 import type { NameCulture } from './names';
 import type { RegionCoord } from './world';
 
-export const SAVE_KEY = 'railsim.save.v2';
-export const SAVE_VERSION = 2;
+export const SAVE_KEY = 'railsim.save.v3';
+export const SAVE_VERSION = 3;
 
 export interface SaveMapSettings {
   /** 已解锁的大区域，第一项为初始区域 (0,0)。 */

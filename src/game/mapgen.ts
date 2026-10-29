@@ -7,7 +7,9 @@ import {
   HEX_DIRECTIONS,
   hexDistance,
   hexesInRange,
+  pixelToAxial,
   smoothstep,
+  SQRT3,
   type Axial,
 } from '../core/hex';
 import { Perlin2D } from '../core/noise';
@@ -56,6 +58,15 @@ const SUBURB_MOISTURE = 0.47;
  */
 const REGION_CANDIDATE_RADIUS = Math.ceil((REGION_SPACING * 2) / 3) + 3;
 
+/**
+ * 区域格使用旋转 30° 的宏观六边形网格：
+ * 顶边和底边水平，左右两侧为斜边，地图轮廓更平滑。
+ * 基向量 u = (bx, by)、v = (bx, -by) 对应像素方向 ±30°。
+ */
+const REGION_LATTICE_SPACING = SQRT3 * HEX_SIZE * REGION_SPACING;
+const REGION_BASIS_X = REGION_LATTICE_SPACING * Math.cos(Math.PI / 6);
+const REGION_BASIS_Y = REGION_LATTICE_SPACING * Math.sin(Math.PI / 6);
+
 /** 每块新区域包含的城镇 / 工业区数量，与初始地图同一量级。 */
 const REGION_TOWNS = 8;
 const REGION_INDUSTRIES = 7;
@@ -91,12 +102,17 @@ export function generateWorld(options: MapGenOptions): World {
 /**
  * 世界坐标中的区域归属：把地图划分成互不重叠的大六边形区域。
  *
- * 先按比例取近似区域，再在附近按实际像素距离找最近的区域中心。
- * 不能只用轴向取整：在三个区域交界的顶点附近可能出现取整误差，
- * 导致某一格既不属于任何已解锁区域，形成空洞。
+ * 区域网格相对地块网格旋转 30°，因此区域顶底为横边、左右为斜边。
+ * 先换算到宏观网格坐标，再在附近按实际像素距离找最近的区域中心；
+ * 不能只用取整：三个区域交界处可能出现取整误差，留下单格空洞。
  */
 export function regionOfTile(q: number, r: number): RegionCoord {
-  const approx = axialRound(q / REGION_SPACING, r / REGION_SPACING);
+  const x = HEX_SIZE * SQRT3 * (q + r / 2);
+  const y = HEX_SIZE * 1.5 * r;
+  const mf = (x / REGION_BASIS_X + y / REGION_BASIS_Y) / 2;
+  const nf = (x / REGION_BASIS_X - y / REGION_BASIS_Y) / 2;
+  const approx = axialRound(mf, nf);
+
   let best: RegionCoord = { q: approx.q, r: approx.r };
   let bestDistance = Infinity;
 
@@ -105,10 +121,10 @@ export function regionOfTile(q: number, r: number): RegionCoord {
     for (let dr = -2; dr <= 2; dr++) {
       const mq = approx.q + dq;
       const mr = approx.r + dr;
-      const dx = q - mq * REGION_SPACING;
-      const dy = r - mr * REGION_SPACING;
-      // 像素距离² 与 dx² + dx·dy + dy² 成正比，省略常数因子
-      const distance = dx * dx + dx * dy + dy * dy;
+      const center = regionCenterPixel({ q: mq, r: mr });
+      const dx = x - center.x;
+      const dy = y - center.y;
+      const distance = dx * dx + dy * dy;
       if (
         distance < bestDistance - 1e-9 ||
         (Math.abs(distance - bestDistance) <= 1e-9 &&
@@ -123,14 +139,18 @@ export function regionOfTile(q: number, r: number): RegionCoord {
   return best;
 }
 
-/** 区域中心的世界轴向坐标。 */
+/** 区域中心对应的近似地块坐标，用于枚举区域内的地块。 */
 export function regionCenter(region: RegionCoord): Axial {
-  return { q: region.q * REGION_SPACING, r: region.r * REGION_SPACING };
+  const center = regionCenterPixel(region);
+  return pixelToAxial(center.x, center.y, HEX_SIZE);
 }
 
-/** 区域中心的世界像素坐标。 */
+/** 区域中心的世界像素坐标（宏观网格旋转 30°）。 */
 export function regionCenterPixel(region: RegionCoord): { x: number; y: number } {
-  return axialToPixel(regionCenter(region), HEX_SIZE);
+  return {
+    x: REGION_BASIS_X * (region.q + region.r),
+    y: REGION_BASIS_Y * (region.q - region.r),
+  };
 }
 
 /** 所有与现有版图相邻、尚未解锁的区域。 */

@@ -209,7 +209,7 @@ export class MapScene extends Phaser.Scene {
     if (!this.expansionActive) return;
 
     const size = HEX_SIZE * REGION_SPACING;
-    const corners = hexCorners(size);
+    const corners = this.regionCorners(size);
     for (const region of this.expansionRegions) {
       const center = regionCenterPixel(region);
       const points = corners.map(
@@ -223,6 +223,18 @@ export class MapScene extends Phaser.Scene {
       g.lineStyle(hovered ? 4 : 2.2, 0xe9b968, hovered ? 1 : 0.62);
       g.strokePoints(points, true);
     }
+  }
+
+  /** 区域格的六个顶点：顶底为横边，左右为斜边。 */
+  private regionCorners(size: number): Phaser.Math.Vector2[] {
+    const points: Phaser.Math.Vector2[] = [];
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 180) * (60 * i);
+      points.push(
+        new Phaser.Math.Vector2(size * Math.cos(angle), size * Math.sin(angle)),
+      );
+    }
+    return points;
   }
 
   private expansionRegionAt(screenX: number, screenY: number): RegionCoord | null {
@@ -578,7 +590,7 @@ export class MapScene extends Phaser.Scene {
     const size = wave.size * (0.25 + eased * 0.75);
     const alpha = Math.max(0, 1 - progress);
 
-    const outer = hexCorners(size).map(
+    const outer = this.regionCorners(size).map(
       (p) => new Phaser.Math.Vector2(wave.cx + p.x, wave.cy + p.y),
     );
     g.lineStyle(7, 0xe9b968, alpha * 0.55);
@@ -586,7 +598,7 @@ export class MapScene extends Phaser.Scene {
     g.lineStyle(2.5, 0xfff1c9, alpha);
     g.strokePoints(outer, true);
 
-    const inner = hexCorners(size * 0.975).map(
+    const inner = this.regionCorners(size * 0.975).map(
       (p) => new Phaser.Math.Vector2(wave.cx + p.x, wave.cy + p.y),
     );
     g.lineStyle(1, 0xfff1c9, alpha * 0.4);
