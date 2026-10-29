@@ -45,6 +45,8 @@ export interface LineInput {
   color: number;
   colorCss: string;
   isLoop: boolean;
+  /** 平均发车：列车与前车间隔过近时在站内等待。 */
+  evenHeadway?: boolean;
   stops: LineStop[];
 }
 
@@ -59,6 +61,7 @@ export interface LineSave {
   color: number;
   colorCss: string;
   isLoop: boolean;
+  evenHeadway?: boolean;
   stops: LineStop[];
   trainIds: number[];
 }
@@ -69,6 +72,8 @@ export interface Line {
   color: number;
   colorCss: string;
   isLoop: boolean;
+  /** 是否启用平均发车。 */
+  evenHeadway: boolean;
   stops: LineStop[];
   trainIds: number[];
   status: LineStatus;
@@ -180,6 +185,8 @@ export interface Train {
   speed: number;
   /** 停站剩余时间（秒）；大于 0 时列车不动。 */
   dwellRemaining: number;
+  /** 因平均发车在站内等待前车拉开间隔。 */
+  waitingForHeadway?: boolean;
   /** 改线回送中；完成后接回新线路首站 */
   reposition?: TrainReposition;
   onboard: Passenger[];
@@ -289,6 +296,7 @@ export interface LineView {
   color: number;
   colorCss: string;
   isLoop: boolean;
+  evenHeadway: boolean;
   status: LineStatus;
   stops: LineStop[];
   trains: TrainView[];
@@ -367,6 +375,10 @@ const TRAIN_ACCEL = 38;
 const TRAIN_BRAKE = 28;
 /** 每次停站的停站时间（秒）。 */
 const DWELL_SECONDS = 1.8;
+/** 平均发车：与前车的理想间隔低于该比例时，在站内等待。 */
+const HEADWAY_MIN_FRACTION = 0.85;
+/** 平均发车：等待时重新检查间隔的间隔（秒）。 */
+const HEADWAY_RECHECK_SECONDS = 0.5;
 /** 判定“已到站”的距离容差（世界像素）。 */
 const STOP_EPSILON = 0.05;
 
@@ -576,6 +588,7 @@ export class RailOperations {
       color: prepared.color,
       colorCss: prepared.colorCss,
       isLoop: prepared.isLoop,
+      evenHeadway: Boolean(input.evenHeadway),
       stops: prepared.stops,
       trainIds: [],
       status: 'OK',
@@ -623,6 +636,7 @@ export class RailOperations {
     line.color = prepared.color;
     line.colorCss = prepared.colorCss;
     line.isLoop = prepared.isLoop;
+    line.evenHeadway = Boolean(input.evenHeadway);
     line.stops = prepared.stops;
     this.applyRoute(line, prepared.route, prepared.stopDistances);
 
@@ -806,10 +820,27 @@ export class RailOperations {
     line.trainIds.push(train.id);
     train.lineId = line.id;
     train.reposition = undefined;
+    train.waitingForHeadway = false;
     train.dir = 1;
     train.speed = 0;
     train.dwellRemaining = existing > 0 ? 0.6 : 1.2;
-    train.distance = line.length * (existing / (existing + 1));
+    if (line.evenHeadway && line.length > 0) {
+      // 按线路周期均匀分配初始相位，避免刚配车就挤在一起
+      const cycle = line.isLoop ? line.length : line.length * 2;
+      const phase = (cycle * existing) / (existing + 1);
+      if (line.isLoop) {
+        train.distance = phase;
+        train.dir = 1;
+      } else if (phase <= line.length) {
+        train.distance = phase;
+        train.dir = 1;
+      } else {
+        train.distance = cycle - phase;
+        train.dir = -1;
+      }
+    } else {
+      train.distance = line.length * (existing / (existing + 1));
+    }
     this.recomputeWaitingRoutes();
 
     return {
@@ -827,6 +858,7 @@ export class RailOperations {
     if (line) line.trainIds = line.trainIds.filter((id) => id !== train.id);
     this.returnOnboard(train);
     train.reposition = undefined;
+    train.waitingForHeadway = false;
     train.lineId = null;
     train.distance = 0;
     train.dir = 1;
@@ -864,7 +896,15 @@ export class RailOperations {
         if (train.dwellRemaining > 0) {
           train.dwellRemaining = Math.max(0, train.dwellRemaining - dt);
           train.speed = 0;
-          if (train.dwellRemaining === 0) this.boardAtStop(line, train, model);
+          if (train.dwellRemaining === 0) {
+            if (this.shouldHoldForHeadway(line, train)) {
+              train.waitingForHeadway = true;
+              train.dwellRemaining = HEADWAY_RECHECK_SECONDS;
+              continue;
+            }
+            train.waitingForHeadway = false;
+            this.boardAtStop(line, train, model);
+          }
           continue;
         }
 
@@ -942,9 +982,56 @@ export class RailOperations {
     return null;
   }
 
+  /**
+   * 列车在线路周期上的相位。
+   * 环线以一圈为周期；往返线以“去程 + 回程”为一圈，
+   * 掉头后相位继续向前推进，便于统一计算发车间隔。
+   */
+  private trainPhase(line: Line, train: Train): number {
+    if (line.length <= 0) return 0;
+    if (line.isLoop) {
+      return ((train.distance % line.length) + line.length) % line.length;
+    }
+    const cycle = line.length * 2;
+    const distance = Math.max(0, Math.min(line.length, train.distance));
+    return train.dir > 0 ? distance : cycle - distance;
+  }
+
+  /** 平均发车：与前车相位间隔小于理想间隔的一定比例时，在站内等待。 */
+  private shouldHoldForHeadway(line: Line, train: Train): boolean {
+    if (!line.evenHeadway || line.length <= 0) return false;
+
+    const trains: Train[] = [];
+    for (const trainId of line.trainIds) {
+      const item = this.trainMap.get(trainId);
+      if (!item || item.reposition || item.lineId !== line.id) continue;
+      trains.push(item);
+    }
+    if (trains.length < 2) return false;
+
+    const cycle = line.isLoop ? line.length : line.length * 2;
+    const targetGap = cycle / trains.length;
+    const phase = this.trainPhase(line, train);
+
+    let nearestGap = Infinity;
+    for (const other of trains) {
+      if (other.id === train.id) continue;
+      let gap = (this.trainPhase(line, other) - phase + cycle) % cycle;
+      if (gap < 0.01) {
+        // 完全重叠时只让编号较大的列车等待，避免两车互相等待
+        if (train.id < other.id) continue;
+        gap = 0;
+      }
+      if (gap < nearestGap) nearestGap = gap;
+    }
+
+    return nearestGap < targetGap * HEADWAY_MIN_FRACTION;
+  }
+
   /** 到站：贴齐站台、下客、清零速度并开始停站读秒。 */
   private arriveAtStop(line: Line, train: Train, rawDistance: number, stopIndex: number): void {
     train.speed = 0;
+    train.waitingForHeadway = false;
     train.dwellRemaining = DWELL_SECONDS;
     if (line.isLoop) {
       train.distance = ((rawDistance % line.length) + line.length) % line.length;
@@ -1769,6 +1856,7 @@ export class RailOperations {
 
   /** 停站结束后确定发车方向，并按每个乘客自己的路线 / 车厢空位上客。 */
   private boardAtStop(line: Line, train: Train, model: TrainModel): void {
+    train.waitingForHeadway = false;
     // 先处理折返，保证在终点站也能向返程方向上客
     if (!line.isLoop) {
       if (train.dir > 0 && train.distance >= line.length - 0.5) train.dir = -1;
@@ -2745,6 +2833,7 @@ export class RailOperations {
         color: line.color,
         colorCss: line.colorCss,
         isLoop: line.isLoop,
+        evenHeadway: line.evenHeadway,
         stops: line.stops.map((stop) => ({ ...stop })),
         trainIds: [...line.trainIds],
       })),
@@ -2816,6 +2905,7 @@ export class RailOperations {
         color: saved.color ?? 0xe9b968,
         colorCss: saved.colorCss ?? '#e9b968',
         isLoop: Boolean(saved.isLoop),
+        evenHeadway: Boolean(saved.evenHeadway),
         stops: (saved.stops ?? []).map((stop) => ({ ...stop })),
         trainIds: [...(saved.trainIds ?? [])],
         status: 'OK',
@@ -2841,6 +2931,7 @@ export class RailOperations {
         dir: saved.dir === -1 ? -1 : 1,
         speed: Number.isFinite(saved.speed) ? saved.speed : 0,
         dwellRemaining: Number.isFinite(saved.dwellRemaining) ? saved.dwellRemaining : 0,
+        waitingForHeadway: false,
         reposition:
           lineId !== null &&
           saved.reposition &&
@@ -3044,7 +3135,7 @@ export class RailOperations {
         state = '回送中';
         nextStopName = line.stops[0]?.name ?? null;
       } else if (train.dwellRemaining > 0) {
-        state = '停站中';
+        state = train.waitingForHeadway ? '等间隔待发' : '停站中';
         const index = this.currentStopIndex(line, train);
         nextStopName = index >= 0 ? line.stops[index]?.name ?? null : null;
       } else {
@@ -3141,6 +3232,7 @@ export class RailOperations {
         color: line.color,
         colorCss: line.colorCss,
         isLoop: line.isLoop,
+        evenHeadway: line.evenHeadway,
         status: line.status,
         stops: line.stops.map((stop) => ({ ...stop })),
         trains,

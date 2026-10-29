@@ -115,6 +115,7 @@ interface DraftLine {
   color: number;
   colorCss: string;
   isLoop: boolean;
+  evenHeadway: boolean;
   stops: LineStop[];
 }
 
@@ -180,6 +181,7 @@ export function createHud(handlers: HudHandlers): Hud {
   const lineNameInput = el<HTMLInputElement>('line-name');
   const lineColors = el<HTMLDivElement>('line-colors');
   const lineLoopButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-loop]'));
+  const lineEvenHeadway = el<HTMLInputElement>('line-even-headway');
   const lineStops = el<HTMLDivElement>('line-stops');
   const lineClearStops = el<HTMLButtonElement>('line-clear-stops');
   const lineCancel = el<HTMLButtonElement>('line-cancel');
@@ -615,6 +617,11 @@ export function createHud(handlers: HudHandlers): Hud {
       updateEditorLoop();
     });
   }
+
+  lineEvenHeadway.addEventListener('change', () => {
+    if (!lineDraft) return;
+    lineDraft.evenHeadway = lineEvenHeadway.checked;
+  });
 
   function applySpeed(speed: number): void {
     currentSpeed = speed;
@@ -1153,7 +1160,15 @@ export function createHud(handlers: HudHandlers): Hud {
       trainCount.className = 'line-train-count';
       trainCount.textContent = `${line.trainCount} 列`;
 
-      head.append(swatch, name, status, trainCount);
+      head.append(swatch, name, status);
+      if (line.evenHeadway) {
+        const headway = document.createElement('span');
+        headway.className = 'line-headway';
+        headway.textContent = '平均';
+        headway.title = '平均发车';
+        head.append(headway);
+      }
+      head.append(trainCount);
 
       const stops = document.createElement('p');
       stops.className = 'line-stops';
@@ -1223,6 +1238,7 @@ export function createHud(handlers: HudHandlers): Hud {
         color: line.color,
         colorCss: line.colorCss,
         isLoop: line.isLoop,
+        evenHeadway: line.evenHeadway,
         stops: line.stops.map((stop) => ({ ...stop })),
       };
       lineNameInput.value = line.name;
@@ -1235,12 +1251,14 @@ export function createHud(handlers: HudHandlers): Hud {
         color: color.color,
         colorCss: color.css,
         isLoop: false,
+        evenHeadway: false,
         stops: [],
       };
       lineNameInput.value = defaultName;
       lineEditorTitle.textContent = '新建线路';
     }
 
+    lineEvenHeadway.checked = lineDraft.evenHeadway;
     updateEditorPalette();
     updateEditorLoop();
     renderDraftStops();
@@ -1404,6 +1422,7 @@ export function createHud(handlers: HudHandlers): Hud {
       color: lineDraft.color,
       colorCss: lineDraft.colorCss,
       isLoop: lineDraft.isLoop,
+      evenHeadway: lineDraft.evenHeadway,
       stops: lineDraft.stops.map((stop) => ({ ...stop })),
     });
   }

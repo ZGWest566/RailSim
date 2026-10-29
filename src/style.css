@@ -1114,6 +1114,17 @@ body.station-mode .toast {
   color: #e39b8e;
 }
 
+.line-headway {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid rgba(233, 185, 104, 0.28);
+  background: rgba(233, 185, 104, 0.08);
+  color: var(--gold);
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+  flex: none;
+}
+
 .line-train-count {
   font-size: 9px;
   color: var(--muted-2);
@@ -1222,6 +1233,36 @@ body.station-mode .toast {
   align-items: center;
   gap: 8px;
   margin-top: 8px;
+}
+
+.editor-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  cursor: pointer;
+}
+
+.editor-toggle input {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
+.editor-toggle span {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text);
+}
+
+.editor-toggle em {
+  min-width: 0;
+  font-size: 9px;
+  line-height: 1.45;
+  color: var(--muted-2);
+  font-style: normal;
 }
 
 .line-colors {
