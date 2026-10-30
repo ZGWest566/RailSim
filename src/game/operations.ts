@@ -400,8 +400,12 @@ const MAX_WAITING = 160;
 
 /** 乘客预算与路径成本使用“游戏分钟”为单位。 */
 const WALK_MINUTES_PER_HEX = 6;
-const INITIAL_WAIT_MINUTES = 8;
+/** 换乘的固定步行 / 站台时间；候车时间另按线路发车间隔计算。 */
 const TRANSFER_MINUTES = 18;
+/** 单站停站时间换算成游戏分钟后，计入乘客的乘车成本。 */
+const STOP_DWELL_MINUTES = DWELL_SECONDS * MINUTES_PER_SECOND;
+/** 寻路时假设的最长候车时间，避免单列车长线因等待过久被完全排除。 */
+const MAX_WAIT_MINUTES = 120;
 const PASSENGER_BUDGET: Record<PassengerKind, number> = {
   commuter: 150,
   tourist: 220,
@@ -489,6 +493,19 @@ interface DestinationCandidate {
   townTiles: number;
   industryTiles: number;
   demandTiles: number;
+}
+
+/**
+ * 一次寻路批次内共享的缓存。
+ * 同一批乘客在同一帧内寻路时，列车位置不会变化，可以复用线路候选与候车时间。
+ */
+interface RoutePlanningContext {
+  usable: Line[];
+  linesAt: Map<string, Line[]>;
+  /** `lineId|stationKey` → 下一班车预计还要等待的游戏分钟数。 */
+  nextWait: Map<string, number>;
+  /** lineId → 平均发车间隔的一半（游戏分钟）。 */
+  expectedWait: Map<number, number>;
 }
 
 
@@ -600,6 +617,8 @@ export class RailOperations {
     };
     this.applyRoute(line, prepared.route, prepared.stopDistances);
     this.lineMap.set(line.id, line);
+    // 线路数据变化后让所有候车 / 换乘乘客按新局面重新选线。
+    this.recomputeWaitingRoutes();
 
     return {
       ok: true,
@@ -1347,9 +1366,10 @@ export class RailOperations {
   /** 接回新线路时重算车上乘客的剩余路线；无法继续的乘客留在首站候车。 */
   private rebaseOnboard(train: Train, stationKey: string): void {
     if (train.onboard.length === 0) return;
+    const planning = this.createRoutePlanningContext();
     const remaining: Passenger[] = [];
     for (const passenger of train.onboard) {
-      const route = this.findPassengerRoute(stationKey, passenger.destKey);
+      const route = this.findPassengerRoute(stationKey, passenger.destKey, planning);
       if (!route) {
         passenger.state = 'WAITING';
         passenger.route = [];
@@ -1487,6 +1507,7 @@ export class RailOperations {
 
     const scaleFactors = this.networkScaleFactors();
     const routeCache = new Map<string, DestinationCandidate[]>();
+    const planning = this.createRoutePlanningContext();
     for (const home of coveredHomes) {
       const rate = tileDemandPerDay(home.terrain);
       if (rate <= 0) continue;
@@ -1494,7 +1515,7 @@ export class RailOperations {
       if (!homeStation) continue;
       const scale = scaleFactors.get(homeStation.id) ?? 1;
       if (!this.rng.chance(Math.min(1, (rate / 24) * scale))) continue;
-      this.spawnPassengerFromTile(home, homeStation, routeCache);
+      this.spawnPassengerFromTile(home, homeStation, routeCache, planning);
     }
   }
 
@@ -1586,11 +1607,12 @@ export class RailOperations {
     home: Tile,
     homeStation: Station,
     routeCache: Map<string, DestinationCandidate[]>,
+    planning: RoutePlanningContext,
   ): void {
     const homeKey = hexKey(homeStation.q, homeStation.r);
     if (this.waitingAt(homeKey).length >= MAX_WAITING) return;
 
-    const candidates = this.destinationCandidates(homeStation, routeCache);
+    const candidates = this.destinationCandidates(homeStation, routeCache, planning);
     if (candidates.length === 0) return;
 
     const walkToStation = hexDistance(home, homeStation.tile) * WALK_MINUTES_PER_HEX;
@@ -1676,6 +1698,7 @@ export class RailOperations {
   private destinationCandidates(
     origin: Station,
     cache: Map<string, DestinationCandidate[]>,
+    planning: RoutePlanningContext,
   ): DestinationCandidate[] {
     const originKey = hexKey(origin.q, origin.r);
     const cached = cache.get(originKey);
@@ -1685,7 +1708,7 @@ export class RailOperations {
     for (const station of this.network.stationList) {
       if (station.type === 'freight' || station.id === origin.id) continue;
       const key = hexKey(station.q, station.r);
-      const route = this.findPassengerRoute(originKey, key);
+      const route = this.findPassengerRoute(originKey, key, planning);
       if (!route) continue;
       let townTiles = 0;
       let industryTiles = 0;
@@ -1726,8 +1749,10 @@ export class RailOperations {
     return best;
   }
 
-  /** 网络变化后，为所有候车 / 换乘乘客重新做独立寻路。 */
+  /** 网络 / 线路变化后，为所有候车 / 换乘乘客重新做独立寻路。 */
   private recomputeWaitingRoutes(): void {
+    // 同一批寻路共享列车位置与线路缓存。
+    const planning = this.createRoutePlanningContext();
     for (const [key, list] of this.waitingByStation) {
       if (list.length === 0) continue;
       const remaining: Passenger[] = [];
@@ -1737,7 +1762,7 @@ export class RailOperations {
           this.giveUpPassenger(passenger);
           continue;
         }
-        const route = this.findPassengerRoute(key, passenger.destKey);
+        const route = this.findPassengerRoute(key, passenger.destKey, planning);
         if (!route) {
           // 暂时没有可用路线（例如某段被剪断）：留在站内等待，网络恢复后会再次寻路
           passenger.route = [];
@@ -1754,6 +1779,37 @@ export class RailOperations {
         remaining.push(passenger);
       }
       this.waitingByStation.set(key, remaining);
+    }
+  }
+
+  /**
+   * 列车进站时，让本站候车乘客按当前列车位置重新选线。
+   * 这样“哪条线先来”不仅影响生成时的估计，也影响实际登车。
+   */
+  private refreshWaitingAtStop(stopKey: string, arrivingLine: Line): void {
+    const list = this.waitingAt(stopKey);
+    if (list.length === 0) return;
+
+    const planning = this.createRoutePlanningContext();
+    const linesHere = planning.linesAt.get(stopKey) ?? [];
+    // 只有一条可用线路时没有选择余地。
+    if (linesHere.length < 2) return;
+
+    for (const passenger of list) {
+      // 刚下车的换乘乘客不再改线，避免又坐回同一列车。
+      if (passenger.state === 'TRANSFERRING') continue;
+
+      const leg = passenger.route[passenger.legIndex];
+      // 已经准备乘坐这班车的乘客不需要重算。
+      if (leg && leg.lineId === arrivingLine.id) continue;
+
+      const route = this.findPassengerRoute(stopKey, passenger.destKey, planning);
+      if (!route) continue;
+
+      passenger.route = route.legs;
+      passenger.legIndex = 0;
+      passenger.expectedCost = passenger.walkMinutes + route.cost;
+      passenger.state = 'WAITING';
     }
   }
 
@@ -1874,6 +1930,9 @@ export class RailOperations {
     const capacity = this.trainCapacity(train);
     if (this.onboardCount(train) >= capacity) return;
 
+    // 列车已经到站：先让本站乘客按“当前这班车”重新选线，实现先来先上。
+    this.refreshWaitingAtStop(stop.key, line);
+
     const carLoads = this.carLoads(train);
     const boarded = new Set<number>();
 
@@ -1985,6 +2044,7 @@ export class RailOperations {
     if (train.onboard.length === 0) return;
     const returning = train.onboard;
     train.onboard = [];
+    const planning = this.createRoutePlanningContext();
 
     for (const passenger of returning) {
       passenger.carIndex = -1;
@@ -1992,7 +2052,7 @@ export class RailOperations {
       passenger.legIndex = 0;
       passenger.state = 'WAITING';
 
-      const route = this.findPassengerRoute(passenger.originKey, passenger.destKey);
+      const route = this.findPassengerRoute(passenger.originKey, passenger.destKey, planning);
       if (!route) {
         passenger.route = [];
         passenger.expectedCost = passenger.walkMinutes;
@@ -2008,23 +2068,16 @@ export class RailOperations {
   /* ------------------------------ 乘客独立寻路 ------------------------------ */
 
   /**
-   * 在“线路 × 车站”服务图上做 Dijkstra / A*。
-   * 节点 = (lineId, station)，乘车边权重 = 预计游戏分钟，换乘边 = 固定惩罚。
+   * 构建一次寻路批次共享的线路缓存。
    * 只考虑已配车且线路正常的线路。
    */
-  private findPassengerRoute(
-    fromKey: string,
-    toKey: string,
-  ): { legs: PassengerLeg[]; cost: number } | null {
-    if (fromKey === toKey) return null;
-
+  private createRoutePlanningContext(): RoutePlanningContext {
     const usable = this.lines.filter(
       (line) =>
         line.status === 'OK' &&
         line.stopDistances.length >= 2 &&
         this.lineHasService(line),
     );
-    if (usable.length === 0) return null;
 
     const linesAt = new Map<string, Line[]>();
     for (const line of usable) {
@@ -2034,6 +2087,33 @@ export class RailOperations {
         else linesAt.set(stop.key, [line]);
       }
     }
+
+    return {
+      usable,
+      linesAt,
+      nextWait: new Map<string, number>(),
+      expectedWait: new Map<number, number>(),
+    };
+  }
+
+  /**
+   * 在“线路 × 车站”服务图上做 Dijkstra。
+   * 节点 = (lineId, station)。
+   * 乘车边权重 = 乘车时间 + 停站时间；
+   * 首次上车权重 = 该线路下一班车实际还要等多久；
+   * 换乘边权重 = 换乘步行时间 + 目标线路的平均候车时间。
+   * 只考虑已配车且线路正常的线路。
+   */
+  private findPassengerRoute(
+    fromKey: string,
+    toKey: string,
+    planning?: RoutePlanningContext,
+  ): { legs: PassengerLeg[]; cost: number } | null {
+    if (fromKey === toKey) return null;
+
+    const context = planning ?? this.createRoutePlanningContext();
+    const { linesAt } = context;
+    if (context.usable.length === 0) return null;
 
     const starts = linesAt.get(fromKey) ?? [];
     if (starts.length === 0) return null;
@@ -2053,7 +2133,11 @@ export class RailOperations {
       open.push(key);
     };
 
-    for (const line of starts) push(line.id, fromKey, INITIAL_WAIT_MINUTES);
+    for (const line of starts) {
+      const wait = this.lineNextWaitMinutes(line, fromKey, context);
+      if (Number.isFinite(wait)) push(line.id, fromKey, wait);
+    }
+    if (open.length === 0) return null;
 
     while (open.length > 0) {
       let bestIndex = 0;
@@ -2089,7 +2173,8 @@ export class RailOperations {
         if (distance <= 0) continue;
         const nextStop = line.stops[nextIndex];
         if (!nextStop) continue;
-        const minutes = (distance / speed) * MINUTES_PER_SECOND;
+        // 每经过一站都计入一次停站；终点站的停站会在路径重建时扣除。
+        const minutes = (distance / speed) * MINUTES_PER_SECOND + STOP_DWELL_MINUTES;
         const nextKey = stateKey(line.id, nextStop.key);
         const nextCost = bestCost + minutes;
         if (nextCost < (best.get(nextKey) ?? Infinity)) {
@@ -2098,11 +2183,13 @@ export class RailOperations {
         }
       }
 
-      // 换乘边
+      // 换乘边：固定换乘时间 + 目标线路的平均候车时间。
       for (const other of linesAt.get(current.stationKey) ?? []) {
         if (other.id === current.lineId) continue;
+        const wait = this.lineExpectedWaitMinutes(other, context);
+        if (!Number.isFinite(wait)) continue;
         const nextKey = stateKey(other.id, current.stationKey);
-        const nextCost = bestCost + TRANSFER_MINUTES;
+        const nextCost = bestCost + TRANSFER_MINUTES + wait;
         if (nextCost < (best.get(nextKey) ?? Infinity)) {
           prev.set(nextKey, { key, via: 'transfer' });
           push(other.id, current.stationKey, nextCost);
@@ -2111,6 +2198,153 @@ export class RailOperations {
     }
 
     return null;
+  }
+
+  /** 线路在某站的下一班车等待时间；同一寻路批次内缓存。 */
+  private lineNextWaitMinutes(
+    line: Line,
+    stopKey: string,
+    context: RoutePlanningContext,
+  ): number {
+    const cacheKey = `${line.id}|${stopKey}`;
+    const cached = context.nextWait.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    let wait = Infinity;
+    for (const trainId of line.trainIds) {
+      const train = this.trainMap.get(trainId);
+      if (!train || train.lineId !== line.id || train.reposition) continue;
+      const arrival = this.nextArrivalMinutes(line, train, stopKey);
+      if (arrival < wait) wait = arrival;
+    }
+
+    // 列车全部在回送时按最长候车处理，等它接回新线路后仍可被乘客选中。
+    if (!Number.isFinite(wait)) wait = MAX_WAIT_MINUTES;
+    const result = Math.min(MAX_WAIT_MINUTES, Math.max(0, wait));
+    context.nextWait.set(cacheKey, result);
+    return result;
+  }
+
+  /** 线路平均发车间隔的一半，作为换乘时的期望候车时间。 */
+  private lineExpectedWaitMinutes(line: Line, context: RoutePlanningContext): number {
+    const cached = context.expectedWait.get(line.id);
+    if (cached !== undefined) return cached;
+
+    let speed = 0;
+    let active = 0;
+    for (const trainId of line.trainIds) {
+      const train = this.trainMap.get(trainId);
+      if (!train || train.lineId !== line.id || train.reposition) continue;
+      const model = trainModel(train.modelId);
+      if (!model) continue;
+      active += 1;
+      speed = Math.max(speed, model.speed);
+    }
+
+    if (active === 0 || speed <= 0 || line.length <= 0) {
+      const fallback =
+        line.trainIds.length > 0 && line.length > 0 ? MAX_WAIT_MINUTES : Infinity;
+      context.expectedWait.set(line.id, fallback);
+      return fallback;
+    }
+
+    // 往返线按“去程 + 回程”一个周期；环线按一圈。
+    const cycleDistance = line.isLoop ? line.length : line.length * 2;
+    const stopEvents = line.isLoop ? line.stops.length : line.stops.length * 2;
+    const cycleMinutes =
+      (cycleDistance / speed) * MINUTES_PER_SECOND + stopEvents * STOP_DWELL_MINUTES;
+    const wait = Math.min(MAX_WAIT_MINUTES, Math.max(0, cycleMinutes / active / 2));
+    context.expectedWait.set(line.id, wait);
+    return wait;
+  }
+
+  /**
+   * 估算某列车下一次到达指定车站还要多少游戏分钟。
+   * 列车正在目标站停站时返回 0；否则沿当前方向逐站推进，
+   * 非环线在端点掉头，最多模拟一个往返周期。
+   */
+  private nextArrivalMinutes(line: Line, train: Train, stopKey: string): number {
+    const model = trainModel(train.modelId);
+    if (!model || line.length <= 0) return Infinity;
+
+    const count = line.stops.length;
+    const targetIndex = line.stops.findIndex((stop) => stop.key === stopKey);
+    if (count === 0 || targetIndex < 0) return Infinity;
+
+    const speed = Math.max(1, model.speed);
+    let distance = line.isLoop
+      ? ((train.distance % line.length) + line.length) % line.length
+      : Math.max(0, Math.min(line.length, train.distance));
+    let dir: 1 | -1 = line.isLoop ? 1 : train.dir;
+    let time = 0;
+
+    const atStop = this.currentStopIndex(line, train);
+    if (atStop === targetIndex && (train.dwellRemaining > 0 || train.speed <= 0.01)) {
+      return 0;
+    }
+    if (train.dwellRemaining > 0) {
+      time += train.dwellRemaining * MINUTES_PER_SECOND;
+    }
+
+    // 非环线最多看一个完整往返；环线最多看一圈。
+    const maxVisits = line.isLoop ? count + 1 : count * 2 + 2;
+    for (let visit = 0; visit < maxVisits; visit++) {
+      let nextIndex = -1;
+      let nextDistance = 0;
+
+      if (line.isLoop) {
+        for (let i = 0; i < count; i++) {
+          const d = line.stopDistances[i] ?? 0;
+          if (d > distance + STOP_EPSILON) {
+            nextIndex = i;
+            nextDistance = d;
+            break;
+          }
+        }
+        if (nextIndex < 0) {
+          nextIndex = 0;
+          nextDistance = (line.stopDistances[0] ?? 0) + line.length;
+        }
+      } else if (dir > 0) {
+        for (let i = 0; i < count; i++) {
+          const d = line.stopDistances[i] ?? 0;
+          if (d > distance + STOP_EPSILON) {
+            nextIndex = i;
+            nextDistance = d;
+            break;
+          }
+        }
+        if (nextIndex < 0) {
+          dir = -1;
+          continue;
+        }
+      } else {
+        for (let i = count - 1; i >= 0; i--) {
+          const d = line.stopDistances[i] ?? 0;
+          if (d < distance - STOP_EPSILON) {
+            nextIndex = i;
+            nextDistance = d;
+            break;
+          }
+        }
+        if (nextIndex < 0) {
+          dir = 1;
+          continue;
+        }
+      }
+
+      const legDistance = Math.abs(nextDistance - distance);
+      time += (legDistance / speed) * MINUTES_PER_SECOND;
+      distance = nextDistance;
+      if (line.isLoop) {
+        distance = ((distance % line.length) + line.length) % line.length;
+      }
+
+      if (nextIndex === targetIndex) return Math.max(0, time);
+      time += STOP_DWELL_MINUTES;
+    }
+
+    return Infinity;
   }
 
   private reconstructPassengerRoute(
@@ -2167,16 +2401,22 @@ export class RailOperations {
           minutes: 0,
         };
       }
+      // 同一段内每多经过一站，就多一次中间停站；第一站不计。
+      const continuing = current.distance > 0;
       current.toKey = toStop.key;
       current.toName = toStop.name;
       current.distance += distance;
-      current.minutes += (distance / Math.max(0.001, this.lineSpeed(line))) * MINUTES_PER_SECOND;
+      current.minutes +=
+        (distance / Math.max(0.001, this.lineSpeed(line))) * MINUTES_PER_SECOND +
+        (continuing ? STOP_DWELL_MINUTES : 0);
     }
 
     if (current) legs.push(current);
     if (legs.length === 0) return null;
     if (legs[legs.length - 1]!.toKey !== toKey) return null;
-    return { legs, cost };
+    // 乘车边为每站都计了一次停站；每段终点站的停站对乘客没有意义，按段数扣回。
+    const adjustedCost = Math.max(0, cost - legs.length * STOP_DWELL_MINUTES);
+    return { legs, cost: adjustedCost };
   }
 
   private rideNeighborIndexes(line: Line, index: number): number[] {
