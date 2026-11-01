@@ -1044,6 +1044,14 @@ body.station-mode .toast {
   bottom: 186px;
 }
 
+.track-picker .picker-options {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+body.track-mode .toast {
+  bottom: 186px;
+}
+
 /* ------------------------------------------------------------------ */
 /* 线路列表 / 线路编辑                                                 */
 /* ------------------------------------------------------------------ */
@@ -1120,6 +1128,17 @@ body.station-mode .toast {
   border: 1px solid rgba(233, 185, 104, 0.28);
   background: rgba(233, 185, 104, 0.08);
   color: var(--gold);
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+  flex: none;
+}
+
+.line-highspeed {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid rgba(158, 27, 50, 0.55);
+  background: rgba(158, 27, 50, 0.18);
+  color: #e8899a;
   font-size: 8.5px;
   letter-spacing: 0.04em;
   flex: none;

@@ -1,4 +1,5 @@
 import { Terrain, TERRAIN_DEFS } from './terrain';
+import { TRACK_KIND_DEFS, type TrackKind } from './tracks';
 import type { Tile } from './world';
 
 /** 初始资金。重生成地图会重置到这个数额。 */
@@ -24,12 +25,16 @@ export const PASSENGER_OPEX_PER_HEX = 40;
 export const CARGO_OPEX_PER_HEX = 20;
 
 /**
- * 铺轨造价 = 基础价 × 地块系数。
- * 山区、城镇更贵，水域按桥梁计价。
+ * 铺轨造价 = 基础价 × 地块系数 × 轨道类型倍率。
+ * 山区、城镇更贵，水域按桥梁计价；高速铁路为普速铁路的 3 倍。
  */
-export function trackCostForTerrain(terrain: Terrain): number {
+export function trackCostForTerrain(
+  terrain: Terrain,
+  kind: TrackKind = 'normal',
+): number {
   const factor = TERRAIN_DEFS[terrain].costFactor;
-  return Math.round((TRACK_BASE_COST * factor) / 100) * 100;
+  const kindFactor = TRACK_KIND_DEFS[kind].costFactor;
+  return Math.round((TRACK_BASE_COST * factor * kindFactor) / 100) * 100;
 }
 
 /** 有实际需求的非荒野地块（水域、山地只作为通道或屏障）。 */

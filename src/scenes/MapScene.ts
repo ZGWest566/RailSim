@@ -12,9 +12,11 @@ import {
   type Axial,
 } from '../core/hex';
 import { RailNetwork } from '../game/network';
+import { TRACK_KIND_DEFS, type TrackKind } from '../game/tracks';
 import { RailOperations, PASSENGER_KIND_DEFS, type Line, type Train } from '../game/operations';
 import type { Truck } from '../game/cargo';
 import { STATION_DEFS, type StationDef, type StationType } from '../game/stations';
+import { trainModel } from '../game/trains';
 import { TERRAIN_DEFS, Terrain } from '../game/terrain';
 import type { MapBlob, RegionCoord, Tile, World } from '../game/world';
 import {
@@ -89,6 +91,7 @@ export class MapScene extends Phaser.Scene {
   private hoverWorld: { x: number; y: number } | null = null;
   private activeTool: BuildTool = 'inspect';
   private activeStationType: StationType = 'light';
+  private activeTrackKind: TrackKind = 'normal';
   private hoveredLineId: number | null = null;
   private lineEditorActive = false;
   private simSpeed = 1;
@@ -281,6 +284,11 @@ export class MapScene extends Phaser.Scene {
     this.activeStationType = type;
     this.lastCoverageSignature = '';
     this.drawNetworkLayers();
+    this.paintOverlays();
+  }
+
+  setTrackKind(kind: TrackKind): void {
+    this.activeTrackKind = kind;
     this.paintOverlays();
   }
 
@@ -864,16 +872,19 @@ export class MapScene extends Phaser.Scene {
     // 站点 / 道岔标记
     for (const track of tracks) {
       const tile = track.tile;
+      const highspeed = track.kind === 'highspeed';
+      const nodeBase = highspeed ? 0x2a0c12 : 0x151b20;
+      const nodeRail = highspeed ? TRACK_KIND_DEFS.highspeed.color : 0xd8dde0;
       if (track.neighbors.length === 0) {
-        g.lineStyle(screen(4.5), 0x151b20, 0.9);
+        g.lineStyle(screen(4.5), nodeBase, 0.9);
         g.lineBetween(tile.x - screen(7), tile.y, tile.x + screen(7), tile.y);
-        g.lineStyle(screen(1.3), 0xd8dde0, 0.9);
+        g.lineStyle(screen(1.3), nodeRail, 0.9);
         g.lineBetween(tile.x - screen(7), tile.y - screen(2), tile.x + screen(7), tile.y - screen(2));
         g.lineBetween(tile.x - screen(7), tile.y + screen(2), tile.x + screen(7), tile.y + screen(2));
       }
       g.fillStyle(0x0b1014, 0.9);
       g.fillCircle(tile.x, tile.y, screen(4.2));
-      g.fillStyle(0xaab4ba, 1);
+      g.fillStyle(nodeRail, 1);
       g.fillCircle(tile.x, tile.y, screen(1.3));
     }
   }
@@ -891,9 +902,18 @@ export class MapScene extends Phaser.Scene {
     const nx = -uy;
     const ny = ux;
     const bridge = a.terrain === Terrain.Water || b.terrain === Terrain.Water;
+    const aTrack = this.network.trackAt(a);
+    const bTrack = this.network.trackAt(b);
+    const highspeed =
+      aTrack?.kind === 'highspeed' && bTrack?.kind === 'highspeed';
+    const def = TRACK_KIND_DEFS[highspeed ? 'highspeed' : 'normal'];
+    const bridgeBase = highspeed ? shadeColor(def.color, 0.45) : 0x2b3339;
+    const ballast = highspeed ? shadeColor(def.color, 0.32) : 0x13191e;
+    const sleeper = highspeed ? shadeColor(def.color, 0.78) : 0x7c5b34;
+    const rail = highspeed ? shadeColor(def.color, 1.55) : 0xd9dee1;
 
     if (bridge) {
-      g.lineStyle(screen(12), 0x2b3339, 0.95);
+      g.lineStyle(screen(12), bridgeBase, 0.95);
       g.lineBetween(a.x, a.y, b.x, b.y);
       g.lineStyle(screen(1), 0x8ba6b4, 0.4);
       g.lineBetween(a.x + nx * screen(4.5), a.y + ny * screen(4.5), b.x + nx * screen(4.5), b.y + ny * screen(4.5));
@@ -901,12 +921,12 @@ export class MapScene extends Phaser.Scene {
     }
 
     // 道砟 / 枕木 / 钢轨
-    g.lineStyle(screen(7.5), 0x13191e, 0.92);
+    g.lineStyle(screen(7.5), ballast, 0.92);
     g.lineBetween(a.x, a.y, b.x, b.y);
 
     const screenLength = length * zoom;
     const sleeperHalf = screen(4.4);
-    g.lineStyle(screen(1.5), 0x7c5b34, 0.92);
+    g.lineStyle(screen(1.5), sleeper, 0.92);
     for (let pos = 4; pos < screenLength - 2; pos += 9) {
       const t = pos / screenLength;
       const x = a.x + dx * t;
@@ -915,7 +935,7 @@ export class MapScene extends Phaser.Scene {
     }
 
     const railOffset = screen(2.1);
-    g.lineStyle(screen(1.4), 0xd9dee1, 0.95);
+    g.lineStyle(screen(1.4), rail, 0.95);
     g.lineBetween(
       a.x + nx * railOffset,
       a.y + ny * railOffset,
@@ -1420,6 +1440,7 @@ export class MapScene extends Phaser.Scene {
     const metrics = this.trainCarMetrics(zoom);
     const samples = this.trainCarSamples(train, line, metrics);
     const dir = train.reposition ? 1 : train.dir;
+    const pointed = trainModel(train.modelId)?.highSpeedCapable ?? false;
 
     for (let index = 0; index < samples.length; index++) {
       const car = samples[index]!;
@@ -1434,6 +1455,7 @@ export class MapScene extends Phaser.Scene {
         line.color,
         car.head,
         dir,
+        pointed,
         zoom,
         passengers,
       );
@@ -1450,6 +1472,7 @@ export class MapScene extends Phaser.Scene {
     color: number,
     head: boolean,
     dir: 1 | -1,
+    pointed: boolean,
     zoom: number,
     passengers: Train['onboard'],
   ): void {
@@ -1458,17 +1481,37 @@ export class MapScene extends Phaser.Scene {
     const halfWidth = width / 2;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
-    const local = [
-      [-halfLength, -halfWidth],
-      [halfLength, -halfWidth],
-      [halfLength, halfWidth],
-      [-halfLength, halfWidth],
-    ];
+    const nose = length * 0.3;
+    const pointedHead = head && pointed;
+
+    const local: [number, number][] = pointedHead
+      ? dir > 0
+        ? [
+            [-halfLength, -halfWidth],
+            [halfLength - nose, -halfWidth],
+            [halfLength, 0],
+            [halfLength - nose, halfWidth],
+            [-halfLength, halfWidth],
+          ]
+        : [
+            [halfLength, -halfWidth],
+            [-halfLength + nose, -halfWidth],
+            [-halfLength, 0],
+            [-halfLength + nose, halfWidth],
+            [halfLength, halfWidth],
+          ]
+      : [
+          [-halfLength, -halfWidth],
+          [halfLength, -halfWidth],
+          [halfLength, halfWidth],
+          [-halfLength, halfWidth],
+        ];
+
     const points = local.map(
       ([lx, ly]) =>
         new Phaser.Math.Vector2(
-          x + (lx ?? 0) * cos - (ly ?? 0) * sin,
-          y + (lx ?? 0) * sin + (ly ?? 0) * cos,
+          x + lx * cos - ly * sin,
+          y + lx * sin + ly * cos,
         ),
     );
 
@@ -1477,8 +1520,8 @@ export class MapScene extends Phaser.Scene {
     g.lineStyle(screen(1.2), 0x0b1116, 0.9);
     g.strokePoints(points, true);
 
-    if (head) {
-      // 车头前端白条，指示行驶方向
+    if (head && !pointedHead) {
+      // 车头前端白条，指示行驶方向；尖头动车组用外形表示方向。
       const travel = angle + (dir < 0 ? Math.PI : 0);
       const tx = Math.cos(travel);
       const ty = Math.sin(travel);
@@ -1986,8 +2029,13 @@ export class MapScene extends Phaser.Scene {
 
     if (this.network && hoveredTile && !this.lineEditorActive) {
       if (this.activeTool === 'track') {
-        const quote = this.network.quoteTrack(hoveredTile);
-        const color = quote.ok ? 0x8fe0b0 : 0xe07a6a;
+        const trackKind = this.activeTrackKind;
+        const quote = this.network.quoteTrack(hoveredTile, trackKind);
+        const color = quote.ok
+          ? trackKind === 'highspeed'
+            ? TRACK_KIND_DEFS.highspeed.color
+            : 0x8fe0b0
+          : 0xe07a6a;
         this.hoverGfx.lineStyle(screen(2.2), color, 0.55);
         for (const dir of HEX_DIRECTIONS) {
           const neighbor = this.world.get(

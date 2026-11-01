@@ -19,6 +19,7 @@ import {
 import { MapScene } from './scenes/MapScene';
 import { createHud, type Hud, type StartSettings } from './ui/hud';
 import type { StationType } from './game/stations';
+import type { TrackKind } from './game/tracks';
 
 const initialQuery = new URLSearchParams(window.location.search);
 const seedFromUrl = parseSeed(initialQuery.get('seed'));
@@ -34,6 +35,7 @@ class RailSimApp {
   private tileRestored = false;
   private activeTool: BuildTool = 'inspect';
   private activeStationType: StationType = 'light';
+  private activeTrackKind: TrackKind = 'normal';
   private lineEditorActive = false;
   private simSpeed = 1;
   private restored = false;
@@ -90,13 +92,19 @@ class RailSimApp {
         this.activeStationType = type;
         this.scene()?.setStationType(type);
       },
+      trackKind: (kind) => {
+        this.activeTrackKind = kind;
+        this.scene()?.setTrackKind(kind);
+      },
       setSpeed: (speed) => {
         this.simSpeed = speed;
         this.scene()?.setSimSpeed(speed);
       },
-      tileInfo: (tile) => this.network.tileInfo(tile, this.activeStationType),
+      tileInfo: (tile) =>
+        this.network.tileInfo(tile, this.activeStationType, this.activeTrackKind),
       stationNetworkBonus: (stationId) => this.operations.networkBonusForStation(stationId),
-      buildTrack: (tile) => this.applyResult(this.network.buildTrack(tile), tile),
+      buildTrack: (tile) =>
+        this.applyResult(this.network.buildTrack(tile, this.activeTrackKind), tile),
       buildStation: (tile) =>
         this.applyResult(this.network.buildStation(tile, this.activeStationType), tile),
       remove: (tile) => this.applyResult(this.network.removeAt(tile), tile),
@@ -155,7 +163,7 @@ class RailSimApp {
     bus.on('line:pick', (tile) => this.pickLineStation(tile));
     bus.on('map:action', ({ tile, tool, neighbor }) => {
       if (tool === 'track') {
-        this.applyResult(this.network.buildTrack(tile), tile);
+        this.applyResult(this.network.buildTrack(tile, this.activeTrackKind), tile);
       } else if (tool === 'station') {
         this.applyResult(this.network.buildStation(tile, this.activeStationType), tile);
       } else if (tool === 'demolish') {

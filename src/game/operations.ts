@@ -25,7 +25,8 @@ import {
 } from './cargo';
 import { Terrain } from './terrain';
 import type { Tile, World } from './world';
-import { trainModel, type TrainModel } from './trains';
+import { trainSpeedOnTrack, trainModel, type TrainModel } from './trains';
+import type { TrackKind } from './tracks';
 
 /* ------------------------------------------------------------------ */
 /* 类型                                                                */
@@ -83,6 +84,10 @@ export interface Line {
   /** 每个停靠站在折线上的累计距离（世界像素），与 stops 一一对应。 */
   stopDistances: number[];
   length: number;
+  /** 线路路径是否经过高速铁路。 */
+  usesHighSpeed: boolean;
+  /** 当前车型与轨道组合下的平均旅行速度（世界像素 / 秒），用于乘客 ETA。 */
+  effectiveSpeed: number;
 }
 
 export type PassengerState = 'WAITING' | 'ON_TRAIN' | 'TRANSFERRING' | 'ARRIVED' | 'GAVE_UP';
@@ -298,6 +303,8 @@ export interface LineView {
   isLoop: boolean;
   evenHeadway: boolean;
   status: LineStatus;
+  /** 线路路径是否经过高速铁路。 */
+  usesHighSpeed: boolean;
   stops: LineStop[];
   trains: TrainView[];
   trainCount: number;
@@ -596,7 +603,8 @@ export class RailOperations {
   /* ------------------------------ 线路 ------------------------------ */
 
   createLine(input: LineInput): OperationResult {
-    const prepared = this.prepareLine(input);
+    // 新建线路时还没有配车，先允许两种轨道，方便先画高铁线路再配动车组。
+    const prepared = this.prepareLine(input, ['normal', 'highspeed']);
     if (!prepared.ok) return { ok: false, message: prepared.message };
 
     const line: Line = {
@@ -614,6 +622,8 @@ export class RailOperations {
       cumulative: [],
       stopDistances: [],
       length: 0,
+      usesHighSpeed: false,
+      effectiveSpeed: 0,
     };
     this.applyRoute(line, prepared.route, prepared.stopDistances);
     this.lineMap.set(line.id, line);
@@ -630,7 +640,7 @@ export class RailOperations {
     const line = this.lineMap.get(id);
     if (!line) return { ok: false, message: '线路不存在' };
 
-    const prepared = this.prepareLine(input);
+    const prepared = this.prepareLine(input, this.allowedTrackKindsForLine(line));
     if (!prepared.ok) return { ok: false, message: prepared.message };
 
     const newFirst = prepared.stops[0];
@@ -731,7 +741,11 @@ export class RailOperations {
         if (station) stop.name = station.name;
       }
 
-      const built = this.buildRoute(line.stops, line.isLoop);
+      const built = this.buildRoute(
+        line.stops,
+        line.isLoop,
+        this.allowedTrackKindsForLine(line),
+      );
       if (!built.ok) {
         this.markBroken(line);
         continue;
@@ -828,10 +842,37 @@ export class RailOperations {
     }
     if (train.lineId === lineId) return { ok: false, message: '列车已在该线路上' };
 
+    const model = trainModel(train.modelId);
+    if (!model) return { ok: false, message: '未知车型' };
+
+    // 普通列车不能进入高速铁路。
+    if (!model.highSpeedCapable && line.usesHighSpeed) {
+      if (line.trainIds.length > 0) {
+        return {
+          ok: false,
+          message: '该线路使用高速铁路，普通列车无法进入；请改用动车组列车。',
+        };
+      }
+      // 空线可以先退回普速路径，再让普通列车配入。
+      const rebuilt = this.buildRoute(line.stops, line.isLoop, ['normal']);
+      if (!rebuilt.ok) {
+        return {
+          ok: false,
+          message: '该线路必须经过高速铁路，普通列车无法进入；请改用动车组列车。',
+        };
+      }
+      this.applyRoute(line, rebuilt.route, rebuilt.stopDistances);
+    } else if (line.trainIds.length === 0 && model.highSpeedCapable) {
+      // 第一列车是动车组时，允许线路重新选择高速路径。
+      const rebuilt = this.buildRoute(line.stops, line.isLoop, ['normal', 'highspeed']);
+      if (rebuilt.ok) this.applyRoute(line, rebuilt.route, rebuilt.stopDistances);
+    }
+
     if (train.lineId !== null) {
       const previous = this.lineMap.get(train.lineId);
       if (previous) {
         previous.trainIds = previous.trainIds.filter((id) => id !== train.id);
+        this.refreshLineSpeed(previous);
       }
     }
 
@@ -860,6 +901,7 @@ export class RailOperations {
     } else {
       train.distance = line.length * (existing / (existing + 1));
     }
+    this.refreshLineSpeed(line);
     this.recomputeWaitingRoutes();
 
     return {
@@ -874,7 +916,10 @@ export class RailOperations {
     if (train.lineId === null) return { ok: false, message: '列车已在库存' };
 
     const line = this.lineMap.get(train.lineId);
-    if (line) line.trainIds = line.trainIds.filter((id) => id !== train.id);
+    if (line) {
+      line.trainIds = line.trainIds.filter((id) => id !== train.id);
+      this.refreshLineSpeed(line);
+    }
     this.returnOnboard(train);
     train.reposition = undefined;
     train.waitingForHeadway = false;
@@ -940,9 +985,24 @@ export class RailOperations {
           continue;
         }
 
-        // 目标速度 = min(巡航速度, 制动曲线给出的进站限速)
+        // 目标速度 = min(当前轨道限速, 轨道切换制动曲线, 进站制动曲线)
+        const allowedSpeed = this.trainSpeedLimitAt(
+          line,
+          model,
+          train.distance,
+          train.dir,
+        );
+        const transitionLimit = this.trackTransitionBrakeLimit(
+          line,
+          model,
+          train.distance,
+          train.dir,
+        );
         const brakeLimit = Math.sqrt(2 * TRAIN_BRAKE * gap);
-        const desired = Math.min(model.speed, brakeLimit);
+        const desired = Math.max(
+          0,
+          Math.min(allowedSpeed, transitionLimit, brakeLimit),
+        );
         if (train.speed < desired) {
           train.speed = Math.min(desired, train.speed + TRAIN_ACCEL * dt);
         } else {
@@ -999,6 +1059,153 @@ export class RailOperations {
       if (distance < train.distance - STOP_EPSILON) return { distance, index: i };
     }
     return null;
+  }
+
+  /** 线路折线上的距离归一化。 */
+  private normalizeRouteDistance(line: Line, distance: number): number {
+    if (line.length <= 0) return 0;
+    if (line.isLoop) return ((distance % line.length) + line.length) % line.length;
+    return Math.max(0, Math.min(line.length, distance));
+  }
+
+  /** 距离所在路段起点索引：cumulative[index] <= d <= cumulative[index+1]。 */
+  private routeSegmentIndex(line: Line, distance: number): number {
+    const d = this.normalizeRouteDistance(line, distance);
+    let index = 0;
+    while (
+      index < line.cumulative.length - 2 &&
+      (line.cumulative[index + 1] ?? 0) <= d + STOP_EPSILON
+    ) {
+      index++;
+    }
+    return index;
+  }
+
+  private routeTileAt(line: Line, index: number): Tile | null {
+    if (line.route.length === 0) return null;
+    let i = index;
+    if (line.isLoop) {
+      i = ((i % line.route.length) + line.route.length) % line.route.length;
+    } else if (i < 0 || i >= line.route.length) {
+      return null;
+    }
+    return line.route[i] ?? null;
+  }
+
+  /** 线路折线上某一节点处的轨道限速。 */
+  private routeSpeedAt(line: Line, model: TrainModel, index: number): number {
+    const tile = this.routeTileAt(line, index);
+    if (!tile) return model.speed;
+    const kind = this.network.trackAt(tile)?.kind ?? 'normal';
+    return trainSpeedOnTrack(model, kind);
+  }
+
+  /** 列车当前所在轨道的限速。 */
+  private trainSpeedLimitAt(
+    line: Line,
+    model: TrainModel,
+    distance: number,
+    dir: 1 | -1,
+  ): number {
+    if (line.route.length < 2 || line.length <= 0) return model.speed;
+    const d = this.normalizeRouteDistance(line, distance);
+    const seg = this.routeSegmentIndex(line, d);
+    const segStart = line.cumulative[seg] ?? 0;
+
+    // 当前路段限速取两端轨道的较低值：
+    // 普速→高速的过渡段仍按普速速度，高速→普速的过渡段则提前降到普速速度。
+    let currentIndex: number;
+    let nextIndex: number;
+    if (dir > 0) {
+      currentIndex = seg;
+      nextIndex = seg + 1;
+    } else if (d <= segStart + STOP_EPSILON) {
+      currentIndex = seg;
+      nextIndex = seg - 1;
+    } else {
+      currentIndex = seg + 1;
+      nextIndex = seg;
+    }
+
+    const currentLimit = this.routeSpeedAt(line, model, currentIndex);
+    const nextLimit = this.routeSpeedAt(line, model, nextIndex);
+    return Math.max(0, Math.min(currentLimit, nextLimit));
+  }
+
+  /** 沿线路方向从当前位置到某个折线节点的距离。 */
+  private distanceToRouteNode(
+    line: Line,
+    fromDistance: number,
+    nodeIndex: number,
+    dir: 1 | -1,
+  ): number {
+    const nodeDistance = line.cumulative[nodeIndex] ?? 0;
+    if (line.isLoop) {
+      const delta =
+        dir > 0 ? nodeDistance - fromDistance : fromDistance - nodeDistance;
+      return ((delta % line.length) + line.length) % line.length;
+    }
+    return dir > 0 ? nodeDistance - fromDistance : fromDistance - nodeDistance;
+  }
+
+  /**
+   * 轨道限速切换的提前制动：
+   * 沿行驶方向寻找降速点，用 v² = vNext² + 2as 反推当前允许速度，
+   * 让动车组在驶出高速铁路前就开始减速。
+   */
+  private trackTransitionBrakeLimit(
+    line: Line,
+    model: TrainModel,
+    distance: number,
+    dir: 1 | -1,
+  ): number {
+    if (line.route.length < 2 || line.length <= 0) return Infinity;
+    const d = this.normalizeRouteDistance(line, distance);
+    const currentLimit = this.trainSpeedLimitAt(line, model, distance, dir);
+    if (!Number.isFinite(currentLimit) || currentLimit <= 0) return 0;
+
+    const seg = this.routeSegmentIndex(line, d);
+    const segStart = line.cumulative[seg] ?? 0;
+    let nodeIndex: number;
+    if (dir > 0) {
+      nodeIndex = seg + 1;
+    } else if (d <= segStart + STOP_EPSILON) {
+      nodeIndex = seg - 1;
+    } else {
+      nodeIndex = seg;
+    }
+    if (line.isLoop && line.route.length > 0) {
+      nodeIndex =
+        ((nodeIndex % line.route.length) + line.route.length) % line.route.length;
+    }
+
+    const lookahead = (currentLimit * currentLimit) / (2 * TRAIN_BRAKE) + 80;
+    let best = Infinity;
+    const maxSteps = line.route.length + 1;
+
+    for (let step = 0; step < maxSteps; step++) {
+      if (!line.isLoop && (nodeIndex < 0 || nodeIndex >= line.route.length)) break;
+
+      const travelled = this.distanceToRouteNode(line, d, nodeIndex, dir);
+      if (travelled > lookahead) break;
+
+      // 该节点之后要进入的轨道限速。
+      const afterIndex = dir > 0 ? nodeIndex + 1 : nodeIndex - 1;
+      const limit = this.routeSpeedAt(line, model, afterIndex);
+      if (limit < currentLimit) {
+        const brakeLimit = Math.sqrt(
+          Math.max(0, limit * limit + 2 * TRAIN_BRAKE * travelled),
+        );
+        if (brakeLimit < best) best = brakeLimit;
+      }
+
+      nodeIndex += dir;
+      if (line.isLoop && line.route.length > 0) {
+        nodeIndex = ((nodeIndex % line.route.length) + line.route.length) % line.route.length;
+      }
+    }
+
+    return best;
   }
 
   /**
@@ -1081,7 +1288,13 @@ export class RailOperations {
     if (train.reposition) {
       const current = this.samplePath(train.reposition, train.reposition.distance);
       if (!current) return null;
-      return this.buildDirectReposition(train, current, target, newFirst.key);
+      return this.buildDirectReposition(
+        train,
+        current,
+        target,
+        newFirst.key,
+        this.allowedTrackKindsForLine(line),
+      );
     }
 
     let nextIndex: number | null = null;
@@ -1115,7 +1328,11 @@ export class RailOperations {
     if (!fromTile) return null;
 
     const leg1 = this.buildLineLeg(line, train.distance, nextDistance);
-    const tiles = this.network.findPath(fromTile, target);
+    const tiles = this.network.findPath(
+      fromTile,
+      target,
+      this.allowedTrackKindsForLine(line),
+    );
     if (!tiles) return null;
     const leg2 = tiles.map((tile) => ({ x: tile.x, y: tile.y }));
 
@@ -1159,10 +1376,11 @@ export class RailOperations {
     current: TrainSample,
     target: Tile,
     targetStopKey: string,
+    allowedKinds: readonly TrackKind[],
   ): TrainReposition | null {
     const start = this.nearestTrackTile(current);
     if (!start) return null;
-    const tiles = this.network.findPath(start, target);
+    const tiles = this.network.findPath(start, target, allowedKinds);
     if (!tiles) return null;
 
     const tailBudget = Math.max(0, (train.cars - 1) * 80);
@@ -2271,7 +2489,8 @@ export class RailOperations {
     const targetIndex = line.stops.findIndex((stop) => stop.key === stopKey);
     if (count === 0 || targetIndex < 0) return Infinity;
 
-    const speed = Math.max(1, model.speed);
+    // 用线路的平均有效速度估算，避免把普速区间也按动车组最高速计算。
+    const speed = Math.max(1, this.lineSpeed(line) || model.speed);
     let distance = line.isLoop
       ? ((train.distance % line.length) + line.length) % line.length
       : Math.max(0, Math.min(line.length, train.distance));
@@ -2449,15 +2668,62 @@ export class RailOperations {
     return this.lineSpeed(line) > 0;
   }
 
-  private lineSpeed(line: Line): number {
-    let fastest = 0;
+  /** 线路当前配车允许进入的轨道类型。普通列车会把整条线限制在普速铁路。 */
+  private allowedTrackKindsForLine(line: Line): TrackKind[] {
     for (const trainId of line.trainIds) {
       const train = this.trainMap.get(trainId);
       if (!train) continue;
       const model = trainModel(train.modelId);
-      if (model) fastest = Math.max(fastest, model.speed);
+      if (model && !model.highSpeedCapable) return ['normal'];
     }
-    return fastest;
+    return ['normal', 'highspeed'];
+  }
+
+  private fastestLineModel(line: Line): TrainModel | null {
+    let best: TrainModel | null = null;
+    for (const trainId of line.trainIds) {
+      const train = this.trainMap.get(trainId);
+      if (!train) continue;
+      const model = trainModel(train.modelId);
+      if (!model) continue;
+      if (!best || model.speed > best.speed) best = model;
+    }
+    return best;
+  }
+
+  /** 按线路实际经过的轨道类型计算平均旅行速度。 */
+  private computeEffectiveSpeed(line: Line): number {
+    const model = this.fastestLineModel(line);
+    if (!model || line.route.length < 2) return 0;
+
+    let totalDistance = 0;
+    let totalSeconds = 0;
+    for (let i = 1; i < line.route.length; i++) {
+      const a = line.route[i - 1]!;
+      const b = line.route[i]!;
+      const distance = Math.hypot(b.x - a.x, b.y - a.y);
+      if (distance <= 0) continue;
+      const kindA = this.network.trackAt(a)?.kind ?? 'normal';
+      const kindB = this.network.trackAt(b)?.kind ?? 'normal';
+      const speed =
+        (trainSpeedOnTrack(model, kindA) + trainSpeedOnTrack(model, kindB)) / 2;
+      if (speed <= 0) return 0;
+      totalDistance += distance;
+      totalSeconds += distance / speed;
+    }
+    return totalSeconds > 0 ? totalDistance / totalSeconds : 0;
+  }
+
+  private refreshLineSpeed(line: Line): void {
+    line.effectiveSpeed = this.computeEffectiveSpeed(line);
+  }
+
+  private lineSpeed(line: Line): number {
+    if (line.effectiveSpeed > 0) return line.effectiveSpeed;
+    const model = this.fastestLineModel(line);
+    if (!model) return 0;
+    if (line.usesHighSpeed && !model.highSpeedCapable) return 0;
+    return model.speed;
   }
 
   /* ------------------------------ 货运 ------------------------------ */
@@ -2693,7 +2959,8 @@ export class RailOperations {
     const from = this.stationAtKey(fromKey);
     const to = this.stationAtKey(toKey);
     if (!from || !to) return null;
-    const tiles = this.network.findPath(from.tile, to.tile);
+    // 货运列车只走普速铁路，禁止借道高速铁路。
+    const tiles = this.network.findPath(from.tile, to.tile, ['normal']);
     if (!tiles) return null;
     return tiles.map((tile) => ({
       x: tile.x,
@@ -3154,6 +3421,8 @@ export class RailOperations {
         cumulative: [],
         stopDistances: [],
         length: 0,
+        usesHighSpeed: false,
+        effectiveSpeed: 0,
       };
       this.lineMap.set(line.id, line);
     }
@@ -3474,6 +3743,7 @@ export class RailOperations {
         isLoop: line.isLoop,
         evenHeadway: line.evenHeadway,
         status: line.status,
+        usesHighSpeed: line.usesHighSpeed,
         stops: line.stops.map((stop) => ({ ...stop })),
         trains,
         trainCount: trains.length,
@@ -3494,6 +3764,7 @@ export class RailOperations {
 
   private prepareLine(
     input: LineInput,
+    allowedKinds: readonly TrackKind[],
   ):
     | {
         ok: true;
@@ -3527,7 +3798,7 @@ export class RailOperations {
       stops.push({ key, name: station.name, q: tile.q, r: tile.r });
     }
 
-    const built = this.buildRoute(stops, input.isLoop);
+    const built = this.buildRoute(stops, input.isLoop, allowedKinds);
     if (!built.ok) return { ok: false, message: built.message };
 
     return {
@@ -3545,6 +3816,7 @@ export class RailOperations {
   private buildRoute(
     stops: LineStop[],
     isLoop: boolean,
+    allowedKinds: readonly TrackKind[],
   ): { ok: true; route: Tile[]; stopDistances: number[] } | { ok: false; message: string } {
     if (stops.length < 2) return { ok: false, message: '线路至少需要 2 个停靠站' };
 
@@ -3567,9 +3839,15 @@ export class RailOperations {
       const to = tiles[(i + 1) % tiles.length]!;
       const fromName = stops[i]!.name;
       const toName = stops[(i + 1) % stops.length]!.name;
-      const path = this.network.findPath(from, to);
+      const path = this.network.findPath(from, to, allowedKinds);
       if (!path) {
-        return { ok: false, message: `${fromName} → ${toName} 之间没有连通轨道` };
+        const kinds = allowedKinds.includes('highspeed')
+          ? '普通 / 高速铁路'
+          : '普通铁路';
+        return {
+          ok: false,
+          message: `${fromName} → ${toName} 之间没有可用的${kinds}连通轨道`,
+        };
       }
       if (route.length === 0) route.push(...path);
       else route.push(...path.slice(1));
@@ -3603,6 +3881,10 @@ export class RailOperations {
       Math.max(0, Math.min(line.length, distance)),
     );
     line.status = 'OK';
+    line.usesHighSpeed = route.some(
+      (tile) => this.network.trackAt(tile)?.kind === 'highspeed',
+    );
+    line.effectiveSpeed = this.computeEffectiveSpeed(line);
   }
 
   private markBroken(line: Line): void {
@@ -3612,6 +3894,8 @@ export class RailOperations {
     line.cumulative = [];
     line.stopDistances = [];
     line.length = 0;
+    line.usesHighSpeed = false;
+    line.effectiveSpeed = 0;
     for (const trainId of line.trainIds) {
       const train = this.trainMap.get(trainId);
       if (!train) continue;

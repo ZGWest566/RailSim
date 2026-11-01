@@ -18,6 +18,7 @@ import {
   type StationType,
 } from '../game/stations';
 import { TRAIN_MODEL_LIST } from '../game/trains';
+import { TRACK_KIND_DEFS, TRACK_KIND_LIST, type TrackKind } from '../game/tracks';
 import { TERRAIN_DEFS, TERRAIN_LIST } from '../game/terrain';
 import { generateWorld } from '../game/mapgen';
 import { NAME_CULTURES, type NameCulture } from '../game/names';
@@ -51,6 +52,7 @@ export interface HudHandlers {
   fit(): void;
   tool(tool: BuildTool): void;
   stationType(type: StationType): void;
+  trackKind(kind: TrackKind): void;
   setSpeed(speed: number): void;
   tileInfo(tile: Tile): TileNetworkInfo;
   /** 车站所在可达线网的客流加成。 */
@@ -104,7 +106,7 @@ export interface Hud {
 
 const TOOL_HINTS: Record<BuildTool, string> = {
   inspect: '拖动平移 · 滚轮缩放 · 点击地块',
-  track: '点击地块铺轨，相邻轨道自动连接',
+  track: '选择普速 / 高速铁路后点击地块，相邻轨道自动连接',
   station: '选择站型后点击地块建站',
   demolish: '点击轨道或车站拆除，返还 50%',
   segment: '点击相邻轨道连接处断开 / 恢复',
@@ -168,6 +170,9 @@ export function createHud(handlers: HudHandlers): Hud {
   const stationPicker = el<HTMLDivElement>('station-picker');
   const stationOptions = el<HTMLDivElement>('station-options');
   const stationButtons: HTMLButtonElement[] = [];
+  const trackPicker = el<HTMLDivElement>('track-picker');
+  const trackOptions = el<HTMLDivElement>('track-options');
+  const trackButtons: HTMLButtonElement[] = [];
   const toolButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.tool[data-tool]'));
   const speedButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.speed-btn'));
 
@@ -237,6 +242,7 @@ export function createHud(handlers: HudHandlers): Hud {
   let toastTimer = 0;
   let activeTool: BuildTool = 'inspect';
   let activeStationType: StationType = 'light';
+  let activeTrackKind: TrackKind = 'normal';
   let hoveredTile: Tile | null = null;
   let selectedTile: Tile | null = null;
   let bootHidden = false;
@@ -291,6 +297,33 @@ export function createHud(handlers: HudHandlers): Hud {
     });
     stationOptions.append(button);
     stationButtons.push(button);
+  }
+
+  // 轨道类型选择条：普速 / 高速
+  for (const def of TRACK_KIND_LIST) {
+    const button = document.createElement('button');
+    button.className = 'station-option';
+    button.dataset.trackKind = def.kind;
+    button.title = def.description;
+
+    const dot = document.createElement('span');
+    dot.className = 'station-dot';
+    dot.style.setProperty('--c', def.colorCss);
+
+    const name = document.createElement('span');
+    name.className = 'station-opt-name';
+    name.textContent = def.name;
+
+    const meta = document.createElement('span');
+    meta.className = 'station-opt-meta';
+    meta.textContent = def.costFactor === 1 ? '标准造价' : `造价 ×${def.costFactor}`;
+
+    button.append(dot, name, meta);
+    button.addEventListener('click', () => {
+      applyTrackKind(def.kind, true);
+    });
+    trackOptions.append(button);
+    trackButtons.push(button);
   }
 
   // 线路色板
@@ -1057,7 +1090,9 @@ export function createHud(handlers: HudHandlers): Hud {
     if (tile.river) blobLabel += ' · 河流';
     tileBlob.textContent = blobLabel;
 
-    tileTrack.textContent = info.hasTrack ? `已铺轨 · ${info.connections} 向` : '未铺设';
+    tileTrack.textContent = info.hasTrack
+      ? `${TRACK_KIND_DEFS[info.trackKind ?? 'normal'].name} · ${info.connections} 向`
+      : '未铺设';
     tileStation.textContent = info.station
       ? `${STATION_DEFS[info.station.type].name} · ${info.station.name}`
       : '无';
@@ -1104,10 +1139,11 @@ export function createHud(handlers: HudHandlers): Hud {
   }
 
   function renderActions(info: TileNetworkInfo): void {
+    const trackDef = TRACK_KIND_DEFS[activeTrackKind];
     actionTrack.disabled = info.hasTrack || !info.trackQuote.ok;
     actionTrack.textContent = info.hasTrack
-      ? '轨道已铺设'
-      : `铺设轨道 · ${compactMoney(info.trackQuote.cost)}`;
+      ? `已铺设${TRACK_KIND_DEFS[info.trackKind ?? 'normal'].name}`
+      : `铺设${trackDef.name} · ${compactMoney(info.trackQuote.cost)}`;
     actionTrack.title = info.trackQuote.reason ?? '';
 
     actionStation.disabled = info.station !== null || !info.stationQuote.ok;
@@ -1161,6 +1197,13 @@ export function createHud(handlers: HudHandlers): Hud {
       trainCount.textContent = `${line.trainCount} 列`;
 
       head.append(swatch, name, status);
+      if (line.usesHighSpeed) {
+        const highspeed = document.createElement('span');
+        highspeed.className = 'line-highspeed';
+        highspeed.textContent = '高铁';
+        highspeed.title = '线路经过高速铁路';
+        head.append(highspeed);
+      }
       if (line.evenHeadway) {
         const headway = document.createElement('span');
         headway.className = 'line-headway';
@@ -1716,11 +1759,12 @@ export function createHud(handlers: HudHandlers): Hud {
       if (info.coveredBy > 0) extras.push(`${info.coveredBy} 站覆盖`);
       text = `${def.name} · (${tile.q}, ${tile.r})${extras.length ? ' · ' + extras.join(' · ') : ''}`;
     } else if (activeTool === 'track') {
+      const kindDef = TRACK_KIND_DEFS[activeTrackKind];
       text = info.hasTrack
-        ? `已铺轨 · ${info.connections} 向`
+        ? `已铺设${TRACK_KIND_DEFS[info.trackKind ?? 'normal'].name} · ${info.connections} 向`
         : info.trackQuote.ok
-          ? `铺轨 ${compactMoney(info.trackQuote.cost)} · ${def.name}`
-          : `无法铺轨：${info.trackQuote.reason}`;
+          ? `${kindDef.name} ${compactMoney(info.trackQuote.cost)} · ${def.name}`
+          : `无法铺设${kindDef.name}：${info.trackQuote.reason}`;
     } else if (activeTool === 'station') {
       const stationDef = STATION_DEFS[activeStationType];
       text = info.station
@@ -1759,13 +1803,15 @@ export function createHud(handlers: HudHandlers): Hud {
       button.classList.toggle('is-active', button.dataset.tool === tool);
     }
     stationPicker.classList.toggle('hidden', tool !== 'station');
+    trackPicker.classList.toggle('hidden', tool !== 'track');
     document.body.classList.toggle('station-mode', tool === 'station');
-    updateDockStatus();
+    document.body.classList.toggle('track-mode', tool === 'track');
     handlers.tool(tool);
+    updateDockStatus();
 
     if (!announce || tool === 'inspect') return;
     if (tool === 'track') {
-      toast('点击地块铺轨。');
+      toast(`已选择${TRACK_KIND_DEFS[activeTrackKind].name}，点击地块铺轨。`);
     } else if (tool === 'station') {
       toast(`已选择${STATION_DEFS[activeStationType].name}，点击地块建站。`);
     } else if (tool === 'segment') {
@@ -1788,6 +1834,22 @@ export function createHud(handlers: HudHandlers): Hud {
     updateDockStatus();
   }
 
+  function applyTrackKind(kind: TrackKind, notify: boolean): void {
+    activeTrackKind = kind;
+    for (const button of trackButtons) {
+      button.classList.toggle('is-active', button.dataset.trackKind === kind);
+    }
+    handlers.trackKind(kind);
+    if (notify) {
+      const def = TRACK_KIND_DEFS[kind];
+      toast(
+        `已选择${def.name}${kind === 'highspeed' ? ' · 造价 3 倍' : ''}`,
+      );
+    }
+    refreshSelected();
+    updateDockStatus();
+  }
+
   function refreshSelected(): void {
     if (selectedTile) renderTile(selectedTile, false);
   }
@@ -1801,6 +1863,7 @@ export function createHud(handlers: HudHandlers): Hud {
 
   setZoomReadoutDefault();
   applyStationType('light', false);
+  applyTrackKind('normal', false);
   selectTool('inspect', false);
   updateLineSectionVisibility();
 

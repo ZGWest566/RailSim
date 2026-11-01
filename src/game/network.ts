@@ -13,6 +13,11 @@ import {
 } from './economy';
 import { STATION_DEFS, type StationType } from './stations';
 import { Terrain } from './terrain';
+import {
+  DEFAULT_TRACK_KIND,
+  TRACK_KIND_DEFS,
+  type TrackKind,
+} from './tracks';
 import type { MapBlob, Tile, World } from './world';
 
 export interface Quote {
@@ -24,6 +29,7 @@ export interface Quote {
 export interface Track {
   tile: Tile;
   cost: number;
+  kind: TrackKind;
   neighbors: Tile[];
   componentId: number;
 }
@@ -72,7 +78,7 @@ export interface NetworkSave {
   totalSpent: number;
   totalRefunded: number;
   nextStationId: number;
-  tracks: { q: number; r: number; cost: number }[];
+  tracks: { q: number; r: number; cost: number; kind?: TrackKind }[];
   stations: {
     id: number;
     q: number;
@@ -89,6 +95,8 @@ export interface NetworkSave {
 export interface TileNetworkInfo {
   credits: number;
   hasTrack: boolean;
+  /** 已铺设轨道的类型；无轨道时为 null。 */
+  trackKind: TrackKind | null;
   trackPaid: number;
   trackQuote: Quote;
   connections: number;
@@ -157,10 +165,20 @@ export class RailNetwork {
 
   /**
    * 在启用的轨道连接上做 A*。列车线路与乘客寻路都以此为基础。
+   * `allowedKinds` 用于限制列车能进入的轨道类型；默认两种都允许。
    * 返回包含起点和终点的地块序列；不可达返回 null。
    */
-  findPath(from: Tile, to: Tile): Tile[] | null {
-    if (!this.hasTrack(from) || !this.hasTrack(to)) return null;
+  findPath(
+    from: Tile,
+    to: Tile,
+    allowedKinds: readonly TrackKind[] = ['normal', 'highspeed'],
+  ): Tile[] | null {
+    const fromTrack = this.trackAt(from);
+    const toTrack = this.trackAt(to);
+    if (!fromTrack || !toTrack) return null;
+    if (!allowedKinds.includes(fromTrack.kind) || !allowedKinds.includes(toTrack.kind)) {
+      return null;
+    }
     const startKey = hexKey(from.q, from.r);
     const goalKey = hexKey(to.q, to.r);
     if (startKey === goalKey) return [from];
@@ -169,16 +187,30 @@ export class RailNetwork {
     const gScore = new Map<string, number>([[startKey, 0]]);
     const cameFrom = new Map<string, Tile>();
     const closed = new Set<string>();
+    // 允许高速铁路时按“时间当量”寻路：高速铁路每格成本 0.5，
+    // 让动车组优先选择高速路径，同时避免为了高铁绕行过远。
+    const preferHighSpeed = allowedKinds.includes('highspeed');
+    const stepCost = (kind: TrackKind): number =>
+      preferHighSpeed && kind === 'highspeed' ? 0.5 : 1;
+    const minStepCost = preferHighSpeed ? 0.5 : 1;
 
     while (open.length > 0) {
       let bestIndex = 0;
       let bestF = Infinity;
+      let bestHighSpeed = -1;
       for (let i = 0; i < open.length; i++) {
         const tile = open[i]!;
         const g = gScore.get(hexKey(tile.q, tile.r)) ?? Infinity;
-        const f = g + hexDistance(tile, to);
-        if (f < bestF) {
+        const f = g + hexDistance(tile, to) * minStepCost;
+        const highSpeed = this.trackAt(tile)?.kind === 'highspeed' ? 1 : 0;
+        if (
+          f < bestF - 0.0001 ||
+          (Math.abs(f - bestF) <= 0.0001 &&
+            preferHighSpeed &&
+            highSpeed > bestHighSpeed)
+        ) {
           bestF = f;
+          bestHighSpeed = highSpeed;
           bestIndex = i;
         }
       }
@@ -201,9 +233,11 @@ export class RailNetwork {
       closed.add(currentKey);
       const currentG = gScore.get(currentKey) ?? Infinity;
       for (const neighbor of this.connectionsFor(current)) {
+        const neighborTrack = this.trackAt(neighbor);
+        if (!neighborTrack || !allowedKinds.includes(neighborTrack.kind)) continue;
         const neighborKey = hexKey(neighbor.q, neighbor.r);
         if (closed.has(neighborKey)) continue;
-        const tentative = currentG + 1;
+        const tentative = currentG + stepCost(neighborTrack.kind);
         if (tentative >= (gScore.get(neighborKey) ?? Infinity)) continue;
         cameFrom.set(neighborKey, current);
         gScore.set(neighborKey, tentative);
@@ -277,6 +311,7 @@ export class RailNetwork {
         q: track.tile.q,
         r: track.tile.r,
         cost: track.cost,
+        kind: track.kind,
       })),
       stations: [...this.stations.values()].map((station) => ({
         id: station.id,
@@ -305,9 +340,13 @@ export class RailNetwork {
     for (const saved of save.tracks ?? []) {
       const tile = this.world.get(saved.q, saved.r);
       if (!tile) continue;
+      const kind: TrackKind = saved.kind === 'highspeed' ? 'highspeed' : 'normal';
       this.tracks.set(hexKey(tile.q, tile.r), {
         tile,
-        cost: Number.isFinite(saved.cost) ? saved.cost : trackCostForTerrain(tile.terrain),
+        cost: Number.isFinite(saved.cost)
+          ? saved.cost
+          : trackCostForTerrain(tile.terrain, kind),
+        kind,
         neighbors: [],
         componentId: -1,
       });
@@ -363,7 +402,11 @@ export class RailNetwork {
     };
   }
 
-  tileInfo(tile: Tile, activeType: StationType): TileNetworkInfo {
+  tileInfo(
+    tile: Tile,
+    activeType: StationType,
+    activeTrackKind: TrackKind = DEFAULT_TRACK_KIND,
+  ): TileNetworkInfo {
     const track = this.trackAt(tile);
     const station = this.stationAt(tile);
     const preview = station
@@ -373,8 +416,9 @@ export class RailNetwork {
     return {
       credits: this.credits,
       hasTrack: track !== null,
+      trackKind: track?.kind ?? null,
       trackPaid: track?.cost ?? 0,
-      trackQuote: this.quoteTrack(tile),
+      trackQuote: this.quoteTrack(tile, activeTrackKind),
       connections: track?.neighbors.length ?? 0,
       station,
       stationQuote: this.quoteStation(tile, activeType),
@@ -387,10 +431,15 @@ export class RailNetwork {
 
   /* ------------------------------ 报价 ------------------------------ */
 
-  quoteTrack(tile: Tile): Quote {
-    const cost = trackCostForTerrain(tile.terrain);
-    if (this.hasTrack(tile)) {
-      return { ok: false, cost, reason: '该地块已铺轨' };
+  quoteTrack(tile: Tile, kind: TrackKind = DEFAULT_TRACK_KIND): Quote {
+    const cost = trackCostForTerrain(tile.terrain, kind);
+    const existing = this.trackAt(tile);
+    if (existing) {
+      return {
+        ok: false,
+        cost,
+        reason: `该地块已铺设${TRACK_KIND_DEFS[existing.kind].name}`,
+      };
     }
     if (this.credits < cost) {
       return { ok: false, cost, reason: `资金不足（需要 ${formatMoney(cost)}）` };
@@ -416,8 +465,8 @@ export class RailNetwork {
 
   /* ------------------------------ 建造 ------------------------------ */
 
-  buildTrack(tile: Tile): BuildResult {
-    const quote = this.quoteTrack(tile);
+  buildTrack(tile: Tile, kind: TrackKind = DEFAULT_TRACK_KIND): BuildResult {
+    const quote = this.quoteTrack(tile, kind);
     if (!quote.ok) return { ok: false, message: quote.reason ?? '无法铺轨' };
 
     this.credits -= quote.cost;
@@ -425,6 +474,7 @@ export class RailNetwork {
     const track: Track = {
       tile,
       cost: quote.cost,
+      kind,
       neighbors: [],
       componentId: -1,
     };
@@ -435,7 +485,7 @@ export class RailNetwork {
       ok: true,
       cost: quote.cost,
       track,
-      message: `已铺轨 · (${tile.q}, ${tile.r}) · ${formatMoney(quote.cost)}`,
+      message: `已铺设${TRACK_KIND_DEFS[kind].name} · (${tile.q}, ${tile.r}) · ${formatMoney(quote.cost)}`,
     };
   }
 
@@ -445,7 +495,7 @@ export class RailNetwork {
 
     const def = STATION_DEFS[type];
     const needsTrack = !this.hasTrack(tile);
-    const trackCost = needsTrack ? trackCostForTerrain(tile.terrain) : 0;
+    const trackCost = needsTrack ? trackCostForTerrain(tile.terrain, DEFAULT_TRACK_KIND) : 0;
 
     this.credits -= quote.cost;
     this.totalSpent += quote.cost;
@@ -454,6 +504,7 @@ export class RailNetwork {
       this.tracks.set(hexKey(tile.q, tile.r), {
         tile,
         cost: trackCost,
+        kind: DEFAULT_TRACK_KIND,
         neighbors: [],
         componentId: -1,
       });

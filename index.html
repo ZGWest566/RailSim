@@ -205,7 +205,7 @@
           <button class="tool is-active" data-tool="inspect" title="查看地块（1）">
             <kbd>1</kbd><span>查看</span>
           </button>
-          <button class="tool" data-tool="track" title="铺设轨道（2）">
+          <button class="tool" data-tool="track" title="铺设铁路（2）">
             <kbd>2</kbd><span>铺轨</span>
           </button>
           <button class="tool" data-tool="station" title="建造车站（3）">
@@ -242,6 +242,14 @@
           <em>选择后点击地块</em>
         </div>
         <div class="picker-options" id="station-options"></div>
+      </div>
+
+      <div class="station-picker track-picker hidden" id="track-picker" role="group" aria-label="轨道类型">
+        <div class="picker-head">
+          <span>轨道类型</span>
+          <em>选择后点击地块</em>
+        </div>
+        <div class="picker-options" id="track-options"></div>
       </div>
 
       <div class="modal hidden" id="garage-modal" role="dialog" aria-modal="true" aria-labelledby="garage-title">
@@ -368,6 +376,7 @@
             <section class="tutorial-section">
               <h3>铺轨与建站</h3>
               <p>在地块上铺设轨道，相邻轨道会自动连接。车站建在轨道上，脚下没有轨道时会自动补轨。车站会覆盖周围地块，覆盖越好，客流越多。</p>
+              <p>选择「铺轨」工具后，可以在地图下方的选择栏里切换普速铁路和深红色的高速铁路。高速铁路造价是普速铁路的 3 倍，只有动车组能进入并全速运行；普通列车会自动避开高速铁路。</p>
             </section>
 
             <section class="tutorial-section">
@@ -377,7 +386,7 @@
 
             <section class="tutorial-section">
               <h3>买车与配车</h3>
-              <p>在车库购买客运列车，再把它配到线路上。列车会沿线路自动往返，到站上下客；车厢满了，乘客会留在站内等待。</p>
+              <p>在车库购买客运列车，再把它配到线路上。列车会沿线路自动往返，到站上下客；车厢满了，乘客会留在站内等待。动车组列车在高速铁路上可达快速列车的两倍速度，在普速铁路上则按快速列车速度行驶。</p>
             </section>
 
             <section class="tutorial-section">
