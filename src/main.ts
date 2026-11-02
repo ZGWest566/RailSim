@@ -2,13 +2,24 @@ import Phaser from 'phaser';
 import './style.css';
 import { bus, type BuildTool } from './core/emitter';
 import { hashSeed } from './core/rng';
-import { hexKey } from './core/hex';
+import { axialRound, hexDistance, hexKey } from './core/hex';
 import type { RegionCoord, Tile, World } from './game/world';
-import { addRegion, describeWorld, generateWorld } from './game/mapgen';
+import {
+  addRegion,
+  describeWorld,
+  expansionCandidates,
+  generateWorld,
+} from './game/mapgen';
 import { expansionCost } from './game/economy';
+import { buildAiState, type AiAction, type AiActionResult } from './game/ai';
 import { DEFAULT_NAME_CULTURE, isNameCulture, type NameCulture } from './game/names';
 import { RailNetwork, type BuildResult } from './game/network';
-import { RailOperations, type LineSavePayload } from './game/operations';
+import {
+  RailOperations,
+  type LineInput,
+  type LineSavePayload,
+  type LineStop,
+} from './game/operations';
 import {
   clearSave,
   loadSave,
@@ -18,7 +29,8 @@ import {
 } from './game/save';
 import { MapScene } from './scenes/MapScene';
 import { createHud, type Hud, type StartSettings } from './ui/hud';
-import type { StationType } from './game/stations';
+import { createAiPanel, type AiPanel } from './ui/aiPanel';
+import { STATION_TYPE_LIST, type StationType } from './game/stations';
 import type { TrackKind } from './game/tracks';
 
 const initialQuery = new URLSearchParams(window.location.search);
@@ -31,6 +43,7 @@ class RailSimApp {
   private network: RailNetwork;
   private operations: RailOperations;
   private readonly hud: Hud;
+  private aiPanel!: AiPanel;
   private readonly game: Phaser.Game;
   private tileRestored = false;
   private activeTool: BuildTool = 'inspect';
@@ -121,6 +134,7 @@ class RailSimApp {
       unassignTrain: (trainId) => this.unassignTrain(trainId),
       startNewGame: (settings) => this.startNewGame(settings),
       continueGame: () => this.continueFromStart(),
+      toggleAi: () => this.aiPanel.toggle(),
       expansionInfo: () => ({
         expansions: this.expansions,
         regions: this.world.regions.length,
@@ -131,6 +145,17 @@ class RailSimApp {
       confirmExpansion: () => this.confirmExpansion(),
       cancelExpansionPick: () => this.cancelExpansionPick(),
       exitExpansionSelection: () => this.exitExpansionSelection(),
+    });
+
+    this.aiPanel = createAiPanel({
+      getState: () =>
+        buildAiState(this.world, this.network, this.operations, this.simSpeed),
+      executeActions: (actions) => this.executeAiActions(actions),
+      canAct: () =>
+        !this.startScreenOpen &&
+        !this.lineEditorActive &&
+        !this.expansionSelecting &&
+        !this.hud.isTutorialOpen(),
     });
 
     this.hud.setNetworkStats(this.network.stats);
@@ -553,6 +578,399 @@ class RailSimApp {
       `新区域已开拓 · 共 ${this.world.regions.length} 块 · 下次开拓 ¥${expansionCost(this.expansions).toLocaleString('en-US')}`,
     );
     this.saveGame();
+  }
+
+  /* ------------------------------ AI 动作执行 ------------------------------ */
+
+  /**
+   * 执行 AI 返回的结构化动作。
+   * 动作只在主程序中执行，AI 不会直接访问 DOM、存档或任意 JavaScript。
+   */
+  private executeAiActions(actions: AiAction[]): AiActionResult[] {
+    const results: AiActionResult[] = [];
+    let networkChanged = false;
+    let linesChanged = false;
+    let fleetChanged = false;
+    let lastExpansion: RegionCoord | null = null;
+
+    if (this.expansionSelecting) this.exitExpansionSelection();
+    if (this.lineEditorActive) this.cancelLineEditor();
+
+    const push = (action: AiAction, ok: boolean, message: string): void => {
+      results.push({ action, ok, message });
+    };
+
+    for (const action of actions.slice(0, 20)) {
+      if (!action || typeof action !== 'object' || typeof action.type !== 'string') {
+        continue;
+      }
+
+      switch (action.type) {
+        case 'build_track': {
+          const tile = this.aiTile(action.q, action.r);
+          if (!tile) {
+            push(action, false, `地块 (${action.q},${action.r}) 不存在`);
+            break;
+          }
+          const kind: TrackKind = action.kind === 'highspeed' ? 'highspeed' : 'normal';
+          const result = this.network.buildTrack(tile, kind);
+          if (result.ok) networkChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'build_station': {
+          const tile = this.aiTile(action.q, action.r);
+          if (!tile) {
+            push(action, false, `地块 (${action.q},${action.r}) 不存在`);
+            break;
+          }
+          if (
+            action.station &&
+            !STATION_TYPE_LIST.some((def) => def.type === action.station)
+          ) {
+            push(action, false, `未知车站类型：${String(action.station)}`);
+            break;
+          }
+          const type: StationType = action.station ?? 'small';
+          const result = this.network.buildStation(tile, type);
+          if (result.ok) networkChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'remove': {
+          const tile = this.aiTile(action.q, action.r);
+          if (!tile) {
+            push(action, false, `地块 (${action.q},${action.r}) 不存在`);
+            break;
+          }
+          const result = this.network.removeAt(tile);
+          if (result.ok) networkChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'connect': {
+          const from = this.aiTile(action.from?.q, action.from?.r);
+          const to = this.aiTile(action.to?.q, action.to?.r);
+          if (!from || !to) {
+            push(action, false, '轨道起点或终点不存在');
+            break;
+          }
+          const waypoints: { q: number; r: number }[] = Array.isArray(action.via)
+            ? action.via
+            : [];
+          const points: Tile[] = [from];
+          let invalidWaypoint = false;
+          for (const point of waypoints) {
+            const tile = this.aiTile(point?.q, point?.r);
+            if (!tile) {
+              invalidWaypoint = true;
+              break;
+            }
+            points.push(tile);
+          }
+          if (invalidWaypoint) {
+            push(action, false, 'connect 的 via 途经点不存在');
+            break;
+          }
+          points.push(to);
+
+          const path: Tile[] = [];
+          const seen = new Set<string>();
+          for (let i = 1; i < points.length; i++) {
+            for (const tile of this.aiHexPath(points[i - 1]!, points[i]!)) {
+              const key = hexKey(tile.q, tile.r);
+              if (seen.has(key)) continue;
+              seen.add(key);
+              path.push(tile);
+            }
+          }
+          if (path.length === 0) {
+            push(action, false, '无法生成轨道路径');
+            break;
+          }
+          const kind: TrackKind = action.kind === 'highspeed' ? 'highspeed' : 'normal';
+          let built = 0;
+          let skipped = 0;
+          let error = '';
+          for (const tile of path) {
+            if (this.network.trackAt(tile)) {
+              skipped += 1;
+              continue;
+            }
+            const result = this.network.buildTrack(tile, kind);
+            if (!result.ok) {
+              error = result.message;
+              break;
+            }
+            built += 1;
+          }
+          if (built > 0) networkChanged = true;
+          if (built === 0 && skipped === 0) {
+            push(action, false, error || '铺轨失败');
+          } else {
+            const kindName = kind === 'highspeed' ? '高速铁路' : '普通铁路';
+            push(
+              action,
+              true,
+              `连接 ${from.q},${from.r} → ${to.q},${to.r}${waypoints.length ? `（经 ${waypoints.length} 个途经点）` : ''} · ${kindName}：新铺 ${built} 格，跳过 ${skipped} 格${error ? `，中断：${error}` : ''}`,
+            );
+          }
+          break;
+        }
+
+        case 'create_line': {
+          const stops = this.aiLineStops(action.stops);
+          if (typeof stops === 'string') {
+            push(action, false, stops);
+            break;
+          }
+          const color = this.aiLineColor(action.color);
+          const input: LineInput = {
+            name: action.name?.trim() || `AI 线路 ${this.operations.lines.length + 1}`,
+            color: color.color,
+            colorCss: color.colorCss,
+            isLoop: Boolean(action.isLoop),
+            evenHeadway: Boolean(action.evenHeadway),
+            stops,
+          };
+          const result = this.operations.createLine(input);
+          if (result.ok) {
+            linesChanged = true;
+            const created = this.operations.lines[this.operations.lines.length - 1];
+            push(action, true, `${result.message}${created ? ` · #${created.id}` : ''}`);
+          } else {
+            push(action, false, result.message);
+          }
+          break;
+        }
+
+        case 'update_line': {
+          const line = this.operations.lineById(action.lineId);
+          if (!line) {
+            push(action, false, `线路 #${action.lineId} 不存在`);
+            break;
+          }
+          const stops = action.stops
+            ? this.aiLineStops(action.stops)
+            : line.stops.map((stop) => ({ ...stop }));
+          if (typeof stops === 'string') {
+            push(action, false, stops);
+            break;
+          }
+          const color = action.color
+            ? this.aiLineColor(action.color)
+            : { color: line.color, colorCss: line.colorCss };
+          const input: LineInput = {
+            name: action.name?.trim() || line.name,
+            color: color.color,
+            colorCss: color.colorCss,
+            isLoop: action.isLoop ?? line.isLoop,
+            evenHeadway: action.evenHeadway ?? line.evenHeadway,
+            stops,
+          };
+          const result = this.operations.updateLine(line.id, input);
+          if (result.ok) linesChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'delete_line': {
+          const result = this.operations.deleteLine(action.lineId);
+          if (result.ok) linesChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'purchase_train': {
+          const result = this.operations.purchaseTrain(action.model);
+          if (!result.ok) {
+            push(action, false, result.message);
+            break;
+          }
+          fleetChanged = true;
+          let message = result.message;
+          if (Number.isFinite(action.lineId)) {
+            const newest = this.operations.trains[this.operations.trains.length - 1];
+            if (newest) {
+              const assigned = this.operations.assignTrain(newest.id, action.lineId!);
+              message += `；${assigned.message}`;
+            }
+          }
+          push(action, true, message);
+          break;
+        }
+
+        case 'assign_train': {
+          const result = this.operations.assignTrain(action.trainId, action.lineId);
+          if (result.ok) fleetChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'unassign_train': {
+          const result = this.operations.unassignTrain(action.trainId);
+          if (result.ok) fleetChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'purchase_truck': {
+          const result = this.operations.purchaseTruck();
+          if (result.ok) fleetChanged = true;
+          push(action, result.ok, result.message);
+          break;
+        }
+
+        case 'expand_region': {
+          const region = {
+            q: Math.round(action.q),
+            r: Math.round(action.r),
+          };
+          if (!Number.isFinite(action.q) || !Number.isFinite(action.r)) {
+            push(action, false, '开拓坐标无效');
+            break;
+          }
+          const available = expansionCandidates(this.world).some(
+            (item) => item.q === region.q && item.r === region.r,
+          );
+          if (!available) {
+            push(action, false, '该区域当前不可开拓');
+            break;
+          }
+          const cost = expansionCost(this.world.regions.length - 1);
+          if (this.network.credits < cost) {
+            push(action, false, `资金不足，需要 ¥${cost.toLocaleString('en-US')}`);
+            break;
+          }
+          this.network.credits -= cost;
+          const added = addRegion(this.world, region, {
+            elevationOffset: this.elevationOffset,
+            moistureOffset: this.moistureOffset,
+            culture: this.mapCulture,
+          });
+          if (!added) {
+            this.network.credits += cost;
+            push(action, false, '区域生成失败');
+            break;
+          }
+          this.operations.refreshWorld();
+          lastExpansion = region;
+          push(
+            action,
+            true,
+            `开拓区域 (${region.q},${region.r}) · 花费 ¥${cost.toLocaleString('en-US')}`,
+          );
+          break;
+        }
+
+        case 'set_speed': {
+          const speed = action.speed === 0 ? 0 : action.speed === 2 ? 2 : 1;
+          this.simSpeed = speed;
+          this.scene()?.setSimSpeed(speed);
+          this.hud.setSpeedDisplay(speed);
+          push(
+            action,
+            true,
+            speed === 0 ? '游戏已暂停' : `游戏速度设为 ${speed}×`,
+          );
+          break;
+        }
+
+        default: {
+          const unknown = action as { type?: string };
+          push(action, false, `未知动作：${unknown.type ?? '?'}`);
+          break;
+        }
+      }
+    }
+
+    if (networkChanged || linesChanged || fleetChanged) {
+      this.operations.recomputeRoutes();
+    }
+
+    const scene = this.scene();
+    if (lastExpansion) {
+      if (scene) scene.expandRegion(lastExpansion);
+      else this.hud.bindWorld(this.world);
+    }
+    if (networkChanged) scene?.refreshNetwork();
+    if (linesChanged || fleetChanged) scene?.refreshLines();
+
+    this.hud.setNetworkStats(this.network.stats);
+    this.hud.setRailView(this.operations.view());
+    this.hud.setClock(this.operations.clockView(), this.network.credits);
+    this.hud.refreshSelected();
+    if (results.some((result) => result.ok)) this.saveGame();
+    return results;
+  }
+
+  private aiTile(q: unknown, r: unknown): Tile | null {
+    if (typeof q !== 'number' || typeof r !== 'number') return null;
+    if (!Number.isFinite(q) || !Number.isFinite(r)) return null;
+    return this.world.get(Math.round(q), Math.round(r)) ?? null;
+  }
+
+  private aiLineStops(
+    stops: { q: number; r: number }[] | undefined,
+  ): LineStop[] | string {
+    if (!Array.isArray(stops) || stops.length < 2) {
+      return '线路至少需要 2 个车站';
+    }
+    const result: LineStop[] = [];
+    const used = new Set<string>();
+    for (const stop of stops) {
+      const tile = this.aiTile(stop?.q, stop?.r);
+      if (!tile) return `车站地块 (${stop?.q},${stop?.r}) 不存在`;
+      const station = this.network.stationAt(tile);
+      if (!station) return `地块 (${tile.q},${tile.r}) 没有车站`;
+      if (station.type === 'freight') return `货运站不能作为客运线路停靠站`;
+      const key = hexKey(station.q, station.r);
+      if (used.has(key)) return `停靠站重复：${station.name}`;
+      used.add(key);
+      result.push({
+        key,
+        name: station.name,
+        q: station.q,
+        r: station.r,
+      });
+    }
+    return result;
+  }
+
+  private aiLineColor(css?: string): { color: number; colorCss: string } {
+    const palette = [
+      '#e9b968',
+      '#6cc4d5',
+      '#7f9cf5',
+      '#8fe0b0',
+      '#e8955f',
+      '#c792ea',
+    ];
+    const fallback = palette[this.operations.lines.length % palette.length]!;
+    const colorCss =
+      typeof css === 'string' && /^#[0-9a-f]{6}$/i.test(css) ? css : fallback;
+    return {
+      color: Number.parseInt(colorCss.slice(1), 16),
+      colorCss,
+    };
+  }
+
+  private aiHexPath(from: Tile, to: Tile): Tile[] {
+    const steps = Math.max(1, hexDistance(from, to));
+    const path: Tile[] = [];
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const rounded = axialRound(
+        from.q + (to.q - from.q) * t,
+        from.r + (to.r - from.r) * t,
+      );
+      const tile = this.world.get(rounded.q, rounded.r);
+      if (tile) path.push(tile);
+    }
+    return path;
   }
 
   private regenerate(seedText: string): void {

@@ -73,6 +73,7 @@ export interface HudHandlers {
   unassignTrain(trainId: number): void;
   startNewGame(settings: StartSettings): void;
   continueGame(): void;
+  toggleAi(): void;
   expansionInfo(): ExpansionInfo;
   startExpansionSelection(): void;
   confirmExpansion(): void;
@@ -90,6 +91,7 @@ export interface Hud {
   refreshSelected(): void;
   hoverTile(tile: Tile | null): void;
   setZoom(zoom: number): void;
+  setSpeedDisplay(speed: number): void;
   setTool(tool: BuildTool): void;
   setStationType(type: StationType): void;
   openLineEditor(line: LineView | null, defaultName: string): void;
@@ -102,6 +104,7 @@ export interface Hud {
   openExpandConfirm(): void;
   /** 显示 / 隐藏“点击黄色六边形”的地图提示。 */
   setExpansionSelecting(active: boolean): void;
+  isTutorialOpen(): boolean;
 }
 
 const TOOL_HINTS: Record<BuildTool, string> = {
@@ -192,6 +195,7 @@ export function createHud(handlers: HudHandlers): Hud {
   const lineCancel = el<HTMLButtonElement>('line-cancel');
   const lineSave = el<HTMLButtonElement>('line-save');
 
+  const aiButton = el<HTMLButtonElement>('ai-button');
   const garageButton = el<HTMLButtonElement>('garage-button');
   const garageModal = el<HTMLDivElement>('garage-modal');
   const garageBackdrop = el<HTMLDivElement>('garage-backdrop');
@@ -656,12 +660,16 @@ export function createHud(handlers: HudHandlers): Hud {
     lineDraft.evenHeadway = lineEvenHeadway.checked;
   });
 
-  function applySpeed(speed: number): void {
+  function syncSpeedDisplay(speed: number): void {
     currentSpeed = speed;
     if (speed > 0) resumeSpeed = speed;
     for (const button of speedButtons) {
       button.classList.toggle('is-active', Number(button.dataset.speed ?? 0) === speed);
     }
+  }
+
+  function applySpeed(speed: number): void {
+    syncSpeedDisplay(speed);
     handlers.setSpeed(speed);
   }
 
@@ -691,6 +699,7 @@ export function createHud(handlers: HudHandlers): Hud {
     }
   });
 
+  aiButton.addEventListener('click', () => handlers.toggleAi());
   garageButton.addEventListener('click', () => openGarage(null));
   garageClose.addEventListener('click', closeGarage);
   garageBackdrop.addEventListener('click', closeGarage);
@@ -1885,6 +1894,7 @@ export function createHud(handlers: HudHandlers): Hud {
     refreshSelected,
     hoverTile: setHovered,
     setZoom,
+    setSpeedDisplay: syncSpeedDisplay,
     setTool: (tool) => selectTool(tool, false),
     setStationType: (type) => applyStationType(type, false),
     openLineEditor,
@@ -1895,6 +1905,7 @@ export function createHud(handlers: HudHandlers): Hud {
     toast,
     openExpandConfirm,
     setExpansionSelecting,
+    isTutorialOpen: () => tutorialOpen,
   };
 }
 
